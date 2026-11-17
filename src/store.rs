@@ -11,10 +11,9 @@ use tempo_types::Revision;
 /// reads a snapshot, asks domain components for pure results, and commits the typed
 /// batch. Study, Chess, Queue and Learning do not import or receive this trait.
 ///
-/// [`crate::MemoryStore`] implements the contract in process memory. A future SQL
-/// adapter must apply each batch in one database transaction, satisfy the same
-/// consistency tests, and additionally prove durability and restart behavior.
-/// Memory tests do not establish those database guarantees.
+/// [`crate::MemoryStore`] implements the contract in process memory.
+/// [`crate::SqliteStore`] uses the same validation and publishes each batch
+/// inside one database transaction.
 pub trait Store {
     /// Read a consistent owned view without changing stored state.
     fn snapshot(&self) -> Result<Snapshot, StoreError>;

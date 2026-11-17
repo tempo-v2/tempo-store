@@ -1,9 +1,8 @@
 # Tempo Store
 
-Store is Tempo's typed persistence boundary. The current `MemoryStore` publishes
-atomic changes in process memory; a future SQL adapter implements the same
-`Store` trait. The application composes transactions. Domain components receive
-values, not a store, database connection or transaction handle.
+Store is Tempo's typed persistence boundary. `MemoryStore` publishes atomic changes
+in process memory. `SqliteStore` commits the same typed batches to a local SQLite
+file. The application composes transactions and passes domain components values.
 
 ## Read the boundary in this order
 
@@ -13,7 +12,8 @@ values, not a store, database connection or transaction handle.
 | `Write` | One typed change requested by the application. | A write does not independently publish a partial operation. |
 | `Commit` | The complete batch and the snapshot stamps it was based on. | It does not calculate grades, learning policy or content changes. |
 | `Store` | The port that returns snapshots and accepts atomic commits. | It does not choose which application operation to run. |
-| `MemoryStore` | The current adapter implementing the persistence contract. | It provides no disk durability or database crash recovery. |
+| `MemoryStore` | A process-local adapter for demos and contract tests. | It has no persistent state. |
+| `SqliteStore` | A file-backed adapter for restarting with the same data. | It accepts the current version-1 schema. |
 
 All public concepts now have named files, “When to use” documentation and
 same-file Rust usage tests. Existing root imports remain available. Start with
@@ -30,6 +30,7 @@ reply before committing them together.
 | Atomic application batch | [commit.rs](src/commit.rs) | Full answer → assessment → Learning → receipt composition; stale revisions and duplicate effects fail. |
 | Adapter interface | [store.rs](src/store.rs) | Issue an attempt through `&mut dyn Store`, without depending on memory internals. |
 | In-memory implementation | [memory_store.rs](src/memory_store.rs) | Inject a failure before publication, prove no partial effects, and retry the same batch. |
+| SQLite implementation | [sqlite_store.rs](src/sqlite_store.rs) | Create a temporary database, reopen it, and read the persisted snapshot. |
 | Concrete Study attempt alias | [chess_attempt.rs](src/chess_attempt.rs) | The persisted alias is the same value Study advances. |
 | Attempt plus issue context | [stored_attempt.rs](src/stored_attempt.rs) | Reject stale miss context/missing prompts; issue a correctly stamped attempt. |
 | Assessment uniqueness identity | [assessment_key.rs](src/assessment_key.rs) | External key and source must name the same provider event. |
@@ -70,10 +71,12 @@ if it were a freshly issued answer against current content.
 
 | Implementation step | File | Responsibility |
 | --- | --- | --- |
-| Orchestrate staging/publication | [memory_store.rs](src/memory_store.rs) | Check snapshot stamps, clone, apply, validate, increment revision and publish once. |
-| Stage one requested write | [apply_write.rs](src/memory_store/apply_write.rs) | Apply typed writes and enforce immediate identity/uniqueness/version constraints. |
-| Validate the complete view | [validate_snapshot.rs](src/memory_store/validate_snapshot.rs) | Check references and attempt/assessment presentation consistency, including history. |
-| Validate newly added outcomes | [validate_outcomes.rs](src/memory_store/validate_outcomes.rs) | Match new assessments to Learning and new replies to committed results without rewriting historical outcomes. |
+| Stage a commit for both adapters | [transaction.rs](src/transaction.rs) | Check snapshot stamps, clone, apply and validate typed writes, then increment the revision. |
+| Read and write a SQLite transaction | [sqlite_store.rs](src/sqlite_store.rs) | Open a consistent read or serialized write transaction and publish the validated batch once. |
+| Define relational constraints | [schema.sql](src/sqlite_store/schema.sql) | Enforce identity and references in SQLite while preserving ordered occurrences. |
+| Stage one requested write | [apply_write.rs](src/transaction/apply_write.rs) | Apply typed writes and enforce immediate identity/uniqueness/version constraints. |
+| Validate the complete view | [validate_snapshot.rs](src/transaction/validate_snapshot.rs) | Check references and attempt/assessment presentation consistency, including history. |
+| Validate newly added outcomes | [validate_outcomes.rs](src/transaction/validate_outcomes.rs) | Match new assessments to Learning and new replies to committed results without rewriting historical outcomes. |
 
 These are private implementation helpers. Their behavior tests live beside the
 public concept the caller needs to understand. [test_support.rs](src/test_support.rs)
@@ -113,12 +116,12 @@ From the assembled development workspace:
 cargo test -p tempo-store
 cargo test -p tempo-store commit::tests
 cargo test -p tempo-store receipt::tests
+cargo test -p tempo-store sqlite_store
 cargo test -p tempo-store --doc
 cargo doc -p tempo-store --no-deps --open
 cargo clippy -p tempo-store --all-targets -- -D warnings
 ```
 
-A SQL adapter must pass the shared persistence expectations and add its own
-schema/constraint, migration, disk durability, restart and crash-recovery
-checks. Passing memory scenarios does not establish those database properties.
-The source split keeps the existing public exports and serialization unchanged.
+The SQLite scenarios check version-1 initialization, unsupported schema versions,
+foreign keys, uniqueness, simultaneous writers, reopen, and rollback after a late
+SQL failure. Schema migration and power-loss qualification remain future work.

@@ -1,4 +1,4 @@
-//! Typed persistence values and the atomic in-memory Store adapter.
+//! Typed persistence values and atomic in-memory and SQLite Store adapters.
 //!
 //! Read [`Snapshot`] for the consistent view, [`Write`] for one requested change,
 //! and [`Commit`] for an atomic batch. The application composes those batches;
@@ -14,9 +14,11 @@ mod memory_store;
 mod receipt;
 mod receipt_result;
 mod snapshot;
+mod sqlite_store;
 mod store;
 mod store_error;
 mod stored_attempt;
+mod transaction;
 mod write;
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ pub use memory_store::MemoryStore;
 pub use receipt::Receipt;
 pub use receipt_result::ReceiptResult;
 pub use snapshot::Snapshot;
+pub use sqlite_store::SqliteStore;
 pub use store::Store;
 pub use store_error::StoreError;
 pub use stored_attempt::StoredAttempt;
