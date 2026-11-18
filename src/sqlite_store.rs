@@ -14,6 +14,7 @@ use tempo_chess::{Catalog, ContentItem};
 use tempo_learning::SchedulerSettings;
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
+mod game_evidence;
 mod load_snapshot;
 mod load_study;
 mod row_values;
@@ -22,7 +23,8 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
+const GAME_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/game_evidence.sql");
 const SCHEMA: &str = include_str!("sqlite_store/schema.sql");
 const DAILY_ALLOWANCE_SCHEMA: &str = include_str!("sqlite_store/daily_allowances.sql");
 const REPERTOIRE_DOCUMENT_SCHEMA: &str = include_str!("sqlite_store/repertoire_documents.sql");
@@ -97,6 +99,9 @@ impl SqliteStore {
             .execute_batch(REPERTOIRE_DOCUMENT_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(GAME_EVIDENCE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -154,7 +159,7 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2 | 3) {
+        if matches!(schema_version(&connection)?, 2..=4) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -166,6 +171,12 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 3 {
                 tx.execute_batch(REPERTOIRE_DOCUMENT_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 4)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 4 {
+                tx.execute_batch(GAME_EVIDENCE_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
@@ -187,6 +198,19 @@ impl SqliteStore {
 mod tactic_page;
 
 impl Store for SqliteStore {
+    fn commit_games(
+        &mut self,
+        commit: Commit,
+        games: &[crate::ComparedGame],
+        successful_refresh_ms: Option<u64>,
+    ) -> Result<crate::GameCommit, StoreError> {
+        self.save_game_evidence(commit, games, successful_refresh_ms)
+    }
+
+    fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
+        self.read_game_history()
+    }
+
     fn tactic_page(
         &self,
         query: crate::TacticPageQuery<'_>,

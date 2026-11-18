@@ -145,6 +145,21 @@ pub trait Store {
             .map(|entry| entry.item))
     }
 
+    /// Save a game batch at the revision whose repertoire was compared.
+    fn commit_games(
+        &mut self,
+        _commit: Commit,
+        _games: &[crate::ComparedGame],
+        _successful_refresh_ms: Option<u64>,
+    ) -> Result<crate::GameCommit, StoreError> {
+        Err(invalid("this Store does not support game evidence"))
+    }
+
+    /// The recent answer-safe comparison records for the active dataset.
+    fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
+        Err(invalid("this Store does not support game evidence"))
+    }
+
     /// Publish the whole batch and return its new store revision, or publish nothing.
     fn commit(&mut self, commit: Commit) -> Result<Revision, StoreError>;
 }
