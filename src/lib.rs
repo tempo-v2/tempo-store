@@ -41,3 +41,9 @@ pub use store::{ContentReceipt, ContentSource, RepertoireDocument, Store, StudyS
 pub use store_error::StoreError;
 pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, StoredAttempt};
 pub use write::Write;
+
+mod game_evidence;
+pub use game_evidence::{
+    AcceptedGames, ComparedGame, GameCommit, GameDeviation, GameHistory, GameHistoryEntry,
+    GameObservation, GameReceipt, GameRecord, GameSummary,
+};
