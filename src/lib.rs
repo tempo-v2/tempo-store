@@ -45,5 +45,5 @@ pub use write::Write;
 mod game_evidence;
 pub use game_evidence::{
     AcceptedGames, ComparedGame, GameCommit, GameDeviation, GameHistory, GameHistoryEntry,
-    GameObservation, GameReceipt, GameRecord, GameSummary,
+    GameObservation, GameReceipt, GameRecord, GameSummary, PgnTiming,
 };

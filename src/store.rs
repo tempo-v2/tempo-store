@@ -165,6 +165,15 @@ pub trait Store {
         Ok(None)
     }
 
+    /// Read chronology for a local PGN with a precise start, by raw game ID.
+    fn pgn_timing(
+        &self,
+        _dataset: &DatasetId,
+        _id: &str,
+    ) -> Result<Option<crate::PgnTiming>, StoreError> {
+        Ok(None)
+    }
+
     /// Resolve a previously verified provider game by canonical URL and played facts.
     fn verified_game(
         &self,

@@ -17,6 +17,45 @@ pub struct GameRecord {
     pub mainline_signature: String,
 }
 
+/// Indexed chronology for one local PGN identity. The normalized start is part
+/// of that identity. End precision may improve when the played facts agree.
+#[derive(Clone, Debug)]
+pub struct PgnTiming {
+    pub mainline_signature: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+}
+
+impl PgnTiming {
+    pub fn merge_end(&mut self, incoming: &Self) -> Result<(), crate::StoreError> {
+        let same_mainline = self.mainline_signature == incoming.mainline_signature;
+        let known_conflict = self
+            .end_ms
+            .zip(incoming.end_ms)
+            .is_some_and(|(old, new)| old != new);
+        let unverified_change =
+            !same_mainline && (self.mainline_signature.is_some() || self.end_ms != incoming.end_ms);
+        if self.start_ms != incoming.start_ms || unverified_change || known_conflict {
+            return Err(crate::store_error::conflict(
+                "a source game identity was delivered with different game facts",
+            ));
+        }
+        self.end_ms = self.end_ms.or(incoming.end_ms);
+        Ok(())
+    }
+}
+
+impl GameRecord {
+    pub fn precise_pgn_timing(&self) -> Option<PgnTiming> {
+        let start_ms = self.start_ms.filter(|_| self.source == "pgn")?;
+        Some(PgnTiming {
+            mainline_signature: Some(self.mainline_signature.clone()),
+            start_ms,
+            end_ms: self.end_ms,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ComparedGame {
     pub game: GameRecord,
@@ -66,6 +105,7 @@ pub struct GameDeviation {
 
 #[derive(Debug)]
 pub struct GameHistoryEntry {
+    pub comparison_id: String,
     pub summary: GameSummary,
     pub deviations: Vec<GameDeviation>,
 }
