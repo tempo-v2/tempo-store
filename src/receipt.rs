@@ -2,7 +2,7 @@
 
 use crate::ReceiptResult;
 use serde::{Deserialize, Serialize};
-use tempo_types::SubmissionId;
+use tempo_types::{DatasetId, EventId, SubmissionId};
 
 /// A submission identity, command equality token, and its exact committed reply.
 ///
@@ -26,6 +26,14 @@ pub struct Receipt {
     /// This is an equality token, never an executable/domain message.
     pub command: String,
     pub result: ReceiptResult,
+}
+
+impl Receipt {
+    /// Identifies the exact delivery receipt owned by an external assessment key.
+    pub fn external_id(dataset: &DatasetId, provider: &str, event: &EventId) -> SubmissionId {
+        let identity = serde_json::json!([dataset, provider, event]);
+        SubmissionId(format!("external:{identity}"))
+    }
 }
 
 #[cfg(test)]
