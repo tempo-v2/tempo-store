@@ -25,9 +25,27 @@ pub(super) fn validate_new_outcomes(
         {
             continue;
         }
-        if attempt.mode == crate::ActivityMode::Teach {
+        if attempt.mode.guided() {
+            let prior = &previous.learning[&attempt.attempt.target];
             let current = &staged.learning[&attempt.attempt.target];
-            if current.taught_at != Some(acceptance.at)
+            if attempt.mode == crate::ActivityMode::Repair {
+                let expected = tempo_learning::DailyLearning::repair(
+                    prior,
+                    attempt.attempt.content_version,
+                    attempt.issued_miss_revision,
+                    acceptance.at,
+                )
+                .map_err(|_| invalid("invalid guided repair"))?;
+                if *current != expected {
+                    return Err(invalid(
+                        "guided repair must commit with its learning transition",
+                    ));
+                }
+            } else if attempt.issued_miss_revision != prior.miss_revision {
+                if current != prior {
+                    return Err(invalid("an older lesson cannot change newer learning"));
+                }
+            } else if current.taught_at != Some(acceptance.at)
                 || current.scheduler_memory.is_some()
                 || current.last_review_at.is_some()
                 || !current.introduced

@@ -217,6 +217,77 @@ pub trait Store {
         Ok(None)
     }
 
+    fn legacy_game_misses(
+        &self,
+        _dataset: &DatasetId,
+        _target: &TargetId,
+        _version: ContentVersion,
+    ) -> Result<Vec<crate::LegacyGameMiss>, StoreError> {
+        Ok(vec![])
+    }
+
+    fn game_comparison(
+        &self,
+        _dataset: &DatasetId,
+        _id: &str,
+    ) -> Result<Option<crate::GameSummary>, StoreError> {
+        Ok(None)
+    }
+
+    fn game_choice_resolved(
+        &self,
+        _dataset: &DatasetId,
+        _source: &str,
+        _game_id: &str,
+        _position: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn game_failed(
+        &self,
+        _dataset: &DatasetId,
+        _key: &crate::GameFailureKey,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn game_failures(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Vec<crate::GameFailureKey>, StoreError> {
+        Ok(vec![])
+    }
+
+    fn stored_game(
+        &self,
+        _dataset: &DatasetId,
+        _source: &str,
+        _id: &str,
+    ) -> Result<Option<crate::GameRecord>, StoreError> {
+        Err(invalid("this Store does not support game evidence"))
+    }
+
+    fn games_in_window(
+        &self,
+        _dataset: &DatasetId,
+        _from: u64,
+        _to: u64,
+    ) -> Result<Vec<crate::GameRecord>, StoreError> {
+        Err(invalid("this Store does not support game evidence"))
+    }
+
+    fn restore_with_game_failures(
+        &mut self,
+        commit: Commit,
+        keys: &[crate::GameFailureKey],
+    ) -> Result<Revision, StoreError> {
+        if !keys.is_empty() {
+            return Err(invalid("this Store does not support game failures"));
+        }
+        self.commit(commit)
+    }
+
     /// The recent answer-safe comparison records for the active dataset.
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
         Err(invalid("this Store does not support game evidence"))

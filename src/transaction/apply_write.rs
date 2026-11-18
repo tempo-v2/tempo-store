@@ -69,7 +69,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.exercise_name != previous.exercise_name
                 || record.lesson != previous.lesson
                 || (previous.acceptance.is_some() && record.acceptance != previous.acceptance)
-                || (record.mode == crate::ActivityMode::Teach && next.terminal.is_some())
+                || (record.mode.guided() && next.terminal.is_some())
                 || old.status != AttemptStatus::Active
                 || old.revision.0.checked_add(1) != Some(next.revision.0)
                 || (old.terminal.is_some() && next.terminal != old.terminal)
@@ -79,7 +79,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 ));
             }
             if let Some(acceptance) = &record.acceptance {
-                use crate::{AcceptanceKind, ActivityMode};
+                use crate::AcceptanceKind;
                 use tempo_types::Grade;
                 if acceptance.at.unix_ms < record.issued_at.unix_ms
                     || acceptance.at.day < record.issued_at.day
@@ -88,15 +88,15 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 }
                 let coherent = match &acceptance.kind {
                     AcceptanceKind::Teaching => {
-                        record.mode == ActivityMode::Teach
+                        record.mode.guided()
                             && next.status == AttemptStatus::Complete
                             && next.terminal.is_none()
                     }
                     AcceptanceKind::Recall => {
-                        record.mode != ActivityMode::Teach && next.terminal == Some(Grade::Good)
+                        !record.mode.guided() && next.terminal == Some(Grade::Good)
                     }
                     AcceptanceKind::WrongMove { .. } | AcceptanceKind::Revealed { .. } => {
-                        record.mode != ActivityMode::Teach && next.terminal == Some(Grade::Again)
+                        !record.mode.guided() && next.terminal == Some(Grade::Again)
                     }
                 };
                 if !coherent {

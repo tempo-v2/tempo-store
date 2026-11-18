@@ -9,9 +9,16 @@ use tempo_types::{MissRevision, StudyTime};
 #[serde(rename_all = "snake_case")]
 pub enum ActivityMode {
     Teach,
+    Repair,
     #[default]
     Test,
     Practice,
+}
+
+impl ActivityMode {
+    pub fn guided(self) -> bool {
+        matches!(self, Self::Teach | Self::Repair)
+    }
 }
 
 /// Accepted activity evidence, including the reason for the first Again.

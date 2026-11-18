@@ -3,12 +3,49 @@ use crate::store_error::{conflict, invalid};
 use crate::transaction::stage_commit;
 use crate::{AcceptedGames, GameReceipt, PgnTiming};
 use crate::{
-    Commit, ComparedGame, GameCommit, GameDeviation, GameHistory, GameHistoryEntry, StoreError,
-    StudyScope, Write,
+    Commit, ComparedGame, GameCommit, GameHistory, GameHistoryEntry, StoreError, StudyScope, Write,
 };
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use tempo_types::{ContentVersion, DatasetId, TargetId};
+
+pub(super) fn game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::GameRecord> {
+    Ok(crate::GameRecord {
+        source: row.get(0)?,
+        id: row.get(1)?,
+        url: row.get(2)?,
+        white: row.get(3)?,
+        black: row.get(4)?,
+        start_ms: row.get(5)?,
+        end_ms: row.get(6)?,
+        fetched_ms: row.get(7)?,
+        pgn: row.get(8)?,
+        mainline_signature: row.get(9)?,
+        played_date_ms: row.get(10)?,
+    })
+}
+
+pub(super) fn save_failure(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+    key: &crate::GameFailureKey,
+    assessment: Option<&crate::AssessmentRecord>,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO game_failures VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            dataset.0,
+            key.source,
+            key.game_id,
+            key.target.0,
+            key.version.0.to_be_bytes().as_slice(),
+            assessment.map(row_values::encode).transpose()?,
+            key.chosen_position,
+        ],
+    )
+    .map_err(database_error)?;
+    Ok(())
+}
 
 impl SqliteStore {
     pub(super) fn save_game_evidence(
@@ -56,7 +93,7 @@ impl SqliteStore {
             let game = &entry.game;
             let raw = transaction
                 .execute(
-                    "INSERT INTO games VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                    "INSERT INTO games VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
                  ON CONFLICT(dataset_id,source,id) DO NOTHING",
                     params![
                         dataset,
@@ -69,7 +106,8 @@ impl SqliteStore {
                         game.end_ms,
                         game.fetched_ms,
                         game.pgn,
-                        game.mainline_signature
+                        game.mainline_signature,
+                        game.played_date_ms
                     ],
                 )
                 .map_err(database_error)?;
@@ -116,6 +154,46 @@ impl SqliteStore {
             }
             result.new_games += raw;
             result.duplicates += 1 - raw;
+            if let Some((comparison, ply, position)) = &entry.resolved_choice {
+                transaction
+                    .execute(
+                        "INSERT INTO game_choice_resolutions VALUES (?1,?2,?3,?4,?5,?6)",
+                        params![dataset, comparison, ply, game.source, game.id, position],
+                    )
+                    .map_err(database_error)?;
+            }
+            for assessment in &entry.failures {
+                let valid = previous
+                    .catalog
+                    .items
+                    .get(&assessment.target)
+                    .is_some_and(|item| {
+                        item.active() && item.version == assessment.content_version
+                    });
+                if !valid
+                    || assessment.dataset != previous.dataset
+                    || assessment.input.grade != tempo_types::Grade::Again
+                    || !matches!(&assessment.input.source, tempo_learning::AssessmentSource::Game { source, game_id, .. }
+                        if *source == game.source && *game_id == game.id)
+                {
+                    return Err(invalid("game failure does not address an active answer"));
+                }
+                save_failure(
+                    &transaction,
+                    &previous.dataset,
+                    &crate::GameFailureKey {
+                        source: game.source.clone(),
+                        game_id: game.id.clone(),
+                        target: assessment.target.clone(),
+                        version: assessment.content_version,
+                        chosen_position: entry
+                            .resolved_choice
+                            .as_ref()
+                            .map(|(_, _, position)| position.clone()),
+                    },
+                    Some(assessment),
+                )?;
+            }
             let compared = transaction
                 .execute(
                     "INSERT INTO game_comparisons(dataset_id,id,source,game_id,summary)
@@ -229,6 +307,7 @@ impl SqliteStore {
                         fetched_ms: row.get(6)?,
                         pgn: row.get(7)?,
                         mainline_signature: signature.into(),
+                        played_date_ms: None,
                     })
                 },
             )
@@ -242,10 +321,8 @@ impl SqliteStore {
         let results = {
             let mut statement = tx
                 .prepare(
-                    "SELECT comparison.dataset_id, comparison.id, comparison.summary, game.start_ms
+                    "SELECT comparison.dataset_id, comparison.id, comparison.summary
                  FROM game_comparisons AS comparison
-                 JOIN games AS game ON game.dataset_id=comparison.dataset_id
-                    AND game.source=comparison.source AND game.id=comparison.game_id
                  WHERE comparison.dataset_id=(SELECT dataset_id FROM store_state WHERE singleton=1)
                  ORDER BY comparison.ordinal DESC LIMIT 100",
                 )
@@ -256,40 +333,31 @@ impl SqliteStore {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<u64>>(3)?,
                     ))
                 })
                 .map_err(database_error)?;
-            let mut misses = tx
-                .prepare(
-                    "SELECT DISTINCT target_id, version FROM game_observations
-                 WHERE dataset_id=?1 AND comparison_id=?2 AND played<>prescribed",
-                )
-                .map_err(database_error)?;
             let mut results = Vec::new();
             for record in records {
-                let (dataset, comparison, summary, start_ms) = record.map_err(database_error)?;
-                let summary: crate::GameSummary = row_values::decode(&summary)?;
-                let rows = misses
-                    .query_map(params![dataset, comparison], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(database_error)?;
-                let deviations = rows
-                    .map(|row| {
-                        let (target, version) = row.map_err(database_error)?;
-                        Ok(GameDeviation {
-                            target: TargetId(target),
-                            version: ContentVersion(row_values::decode_counter(version)?),
-                            start_ms,
-                            end_ms: summary.occurrence_end_ms,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, StoreError>>()?;
+                let (dataset, comparison, summary) = record.map_err(database_error)?;
+                let mut summary: crate::GameSummary = row_values::decode(&summary)?;
+                if !summary.choices.is_empty() {
+                    let resolved: Vec<String> = row_values::read_selected(
+                        &tx,
+                        "SELECT position FROM game_choice_resolutions WHERE dataset_id=?1 AND source=?2 AND game_id=?3 UNION SELECT chosen_position FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position IS NOT NULL",
+                        params![dataset, summary.source, summary.game_id],
+                        |row| row.get(0).map_err(database_error),
+                    )?;
+                    summary
+                        .choices
+                        .retain(|choice| !resolved.contains(&choice.position));
+                    if summary.choices.is_empty() {
+                        summary.correction_effect =
+                            Some(tempo_learning::GameReviewEffect::AlreadyAddressed);
+                    }
+                }
                 results.push(GameHistoryEntry {
                     comparison_id: comparison,
                     summary,
-                    deviations,
                 });
             }
             results
@@ -389,10 +457,13 @@ mod tests {
                 start_ms: Some(100),
                 end_ms,
                 fetched_ms: 1000,
+                played_date_ms: None,
                 pgn: "game".into(),
                 mainline_signature: id.into(),
             },
             id: format!("comparison-{id}"),
+            failures: vec![],
+            resolved_choice: None,
             summary: GameSummary {
                 source: "pgn".into(),
                 game_id: id.into(),
@@ -405,6 +476,9 @@ mod tests {
                 first_deviation_ply: None,
                 coverage_gaps: 0,
                 opponent_deviations: 0,
+                correction_effect: None,
+                choices: vec![],
+                disagreements: vec![],
             },
             observations: vec![],
         };
