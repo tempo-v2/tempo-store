@@ -4,6 +4,16 @@ use crate::ChessAttempt;
 use serde::{Deserialize, Serialize};
 use tempo_types::{MissRevision, StudyTime};
 
+/// Fixed when an activity is durably issued.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityMode {
+    Teach,
+    #[default]
+    Test,
+    Practice,
+}
+
 /// A Study attempt plus the learning context fixed when it was issued.
 ///
 /// # When to use
@@ -22,6 +32,14 @@ pub struct StoredAttempt {
     pub attempt: ChessAttempt,
     pub issued_at: StudyTime,
     pub issued_miss_revision: MissRevision,
+    #[serde(default)]
+    pub mode: ActivityMode,
+    #[serde(default)]
+    pub route: Option<String>,
+    #[serde(default)]
+    pub first_introduction: bool,
+    #[serde(default)]
+    pub repertoire_name: Option<String>,
 }
 
 #[cfg(test)]

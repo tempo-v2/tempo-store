@@ -1,7 +1,27 @@
 //! Store and its usage scenarios.
 
 use crate::{Commit, Snapshot, StoreError};
-use tempo_types::Revision;
+use tempo_chess::ContentItem;
+use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, SubmissionId, TargetId};
+
+/// Current study reads exclude unrelated attempts and their outcomes.
+#[derive(Clone, Copy, Default)]
+pub struct StudyScope<'a> {
+    pub catalog: bool,
+    pub attempt: Option<&'a AttemptId>,
+    pub target: Option<&'a TargetId>,
+    pub submission: Option<&'a SubmissionId>,
+}
+
+pub struct ContentReceipt<'a> {
+    pub request: &'a str,
+    pub reply: &'a str,
+}
+
+pub struct ContentSource<'a> {
+    pub id: &'a str,
+    pub pgn: &'a str,
+}
 
 /// The consistent-read and atomic-write persistence boundary.
 ///
@@ -17,6 +37,58 @@ use tempo_types::Revision;
 pub trait Store {
     /// Read a consistent owned view without changing stored state.
     fn snapshot(&self) -> Result<Snapshot, StoreError>;
+    /// Read current study state with only the referenced outcome/receipt.
+    fn study_state(&self, _scope: StudyScope<'_>) -> Result<Snapshot, StoreError> {
+        self.snapshot()
+    }
+
+    /// Publish a study batch checked against the same current-state scope.
+    fn commit_study(
+        &mut self,
+        commit: Commit,
+        _scope: StudyScope<'_>,
+    ) -> Result<Revision, StoreError> {
+        self.commit(commit)
+    }
+
+    fn content_state(&self) -> Result<(Snapshot, Revision), StoreError> {
+        let state = self.snapshot()?;
+        let revision = state.revision;
+        Ok((state, revision))
+    }
+
+    fn content_receipt(&self, _request: &str) -> Result<Option<String>, StoreError> {
+        Ok(None)
+    }
+
+    /// Pin sources and the application's reply in the content transaction.
+    fn commit_content(
+        &mut self,
+        commit: Commit,
+        _source: Option<ContentSource<'_>>,
+        _receipt: Option<ContentReceipt<'_>>,
+    ) -> Result<Revision, StoreError> {
+        self.commit(commit)
+    }
+
+    fn issued_item(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+    ) -> Result<Option<ContentItem>, StoreError> {
+        Ok(self
+            .snapshot()?
+            .content_history
+            .into_iter()
+            .find(|entry| {
+                &entry.dataset == dataset
+                    && &entry.item.target == target
+                    && entry.item.version == version
+            })
+            .map(|entry| entry.item))
+    }
+
     /// Publish the whole batch and return its new store revision, or publish nothing.
     fn commit(&mut self, commit: Commit) -> Result<Revision, StoreError>;
 }

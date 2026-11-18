@@ -17,6 +17,14 @@ pub(super) fn save_snapshot(
         previous.is_none_or(|old| old.dataset != next.dataset || old.catalog != next.catalog);
     if replace_catalog {
         save_catalog(transaction, next)?;
+        if previous.is_some() {
+            transaction
+                .execute(
+                    "UPDATE store_state SET content_revision=content_revision+1",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
     }
     for (target, state) in &next.learning {
         if replace_catalog || previous.and_then(|old| old.learning.get(target)) != Some(state) {
@@ -50,7 +58,7 @@ pub(super) fn save_snapshot(
 
     transaction
         .execute(
-            "INSERT INTO store_state VALUES (1, ?1, ?2, ?3, ?4)
+            "INSERT INTO store_state (singleton, dataset_id, revision, active_attempt_id, policy) VALUES (1, ?1, ?2, ?3, ?4)
              ON CONFLICT(singleton) DO UPDATE SET dataset_id = excluded.dataset_id,
              revision = excluded.revision, active_attempt_id = excluded.active_attempt_id,
              policy = excluded.policy",
@@ -157,7 +165,7 @@ fn save_outcomes(
     next: &Snapshot,
 ) -> Result<(), StoreError> {
     let assessment_count = previous.map_or(0, |old| old.assessments.len());
-    for (ordinal, record) in next.assessments.iter().enumerate().skip(assessment_count) {
+    for record in next.assessments.iter().skip(assessment_count) {
         let (attempt, provider, event) = match &record.key {
             AssessmentKey::Human(id) => (Some(&id.0), None, None),
             AssessmentKey::External { provider, event_id } => {
@@ -166,9 +174,8 @@ fn save_outcomes(
         };
         transaction
             .execute(
-                "INSERT INTO assessments VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO assessments VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    row_index(ordinal)?,
                     record.dataset.0,
                     record.target.0,
                     record.content_version.0.to_be_bytes().as_slice(),

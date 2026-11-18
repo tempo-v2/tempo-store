@@ -96,5 +96,18 @@ CREATE TABLE store_state (
     revision BLOB NOT NULL CHECK (length(revision) = 8),
     active_attempt_id TEXT,
     policy TEXT NOT NULL,
+    local_profile TEXT,
+    content_revision INTEGER NOT NULL DEFAULT 0 CHECK(content_revision >= 0),
     FOREIGN KEY (active_attempt_id, dataset_id) REFERENCES attempts(id, dataset_id)
+) STRICT;
+
+CREATE TABLE content_sources (
+    id TEXT PRIMARY KEY,
+    pgn TEXT NOT NULL
+) STRICT;
+
+
+CREATE TABLE content_receipts (
+    request TEXT PRIMARY KEY,
+    reply TEXT NOT NULL
 ) STRICT;

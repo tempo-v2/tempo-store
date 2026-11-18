@@ -77,6 +77,10 @@ mod tests {
                 unix_ms: 100,
             },
             issued_miss_revision: initial.learning[&target].miss_revision,
+            mode: crate::ActivityMode::Test,
+            route: None,
+            first_introduction: false,
+            repertoire_name: None,
         };
         store
             .commit(Commit {

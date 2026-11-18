@@ -5,12 +5,14 @@ use tempo_study::AttemptStatus;
 use tempo_types::Revision;
 
 fn remember_catalog(state: &mut Snapshot) {
+    let retained: std::collections::BTreeSet<_> = state
+        .content_history
+        .iter()
+        .filter(|entry| entry.dataset == state.dataset)
+        .map(|entry| (entry.item.target.clone(), entry.item.version))
+        .collect();
     for item in state.catalog.items.values() {
-        if !state.content_history.iter().any(|old| {
-            old.dataset == state.dataset
-                && old.item.target == item.target
-                && old.item.version == item.version
-        }) {
+        if !retained.contains(&(item.target.clone(), item.version)) {
             state.content_history.push(ContentHistory {
                 dataset: state.dataset.clone(),
                 item: item.clone(),
@@ -60,6 +62,11 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || next.content_version != old.content_version
                 || record.issued_at != previous.issued_at
                 || record.issued_miss_revision != previous.issued_miss_revision
+                || record.mode != previous.mode
+                || record.route != previous.route
+                || record.first_introduction != previous.first_introduction
+                || record.repertoire_name != previous.repertoire_name
+                || (record.mode == crate::ActivityMode::Teach && next.terminal.is_some())
                 || old.status != AttemptStatus::Active
                 || old.revision.0.checked_add(1) != Some(next.revision.0)
                 || (old.terminal.is_some() && next.terminal != old.terminal)

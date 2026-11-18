@@ -25,19 +25,29 @@ pub(super) fn validate_snapshot(state: &Snapshot) -> Result<(), StoreError> {
             .attempts
             .get(id)
             .ok_or_else(|| invalid("active attempt does not exist"))?;
-        if row.attempt.dataset != state.dataset || row.attempt.status != AttemptStatus::Active {
+        if row.attempt.dataset != state.dataset
+            || row.attempt.status != AttemptStatus::Active
+            || state
+                .catalog
+                .items
+                .get(&row.attempt.target)
+                .is_none_or(|item| !item.active() || item.version != row.attempt.content_version)
+        {
             return Err(invalid(
                 "active attempt must be open in the current dataset",
             ));
         }
     }
+    let mut assessed = std::collections::BTreeSet::new();
     for record in &state.assessments {
         if let AssessmentKey::Human(id) = &record.key {
+            assessed.insert((record.dataset.clone(), id.clone()));
             let issued = state
                 .attempts
                 .get(id)
                 .ok_or_else(|| invalid("assessment has no attempt"))?;
-            if issued.attempt.dataset != record.dataset
+            if issued.mode != crate::ActivityMode::Test
+                || issued.attempt.dataset != record.dataset
                 || issued.attempt.target != record.target
                 || issued.attempt.content_version != record.content_version
                 || issued.attempt.terminal != Some(record.input.grade)
@@ -58,10 +68,8 @@ pub(super) fn validate_snapshot(state: &Snapshot) -> Result<(), StoreError> {
             ));
         }
         if record.attempt.terminal.is_some()
-            && !state.assessments.iter().any(|a| {
-                a.key == AssessmentKey::Human(record.attempt.id.clone())
-                    && a.dataset == record.attempt.dataset
-            })
+            && record.mode == crate::ActivityMode::Test
+            && !assessed.contains(&(attempt.dataset.clone(), attempt.id.clone()))
         {
             return Err(invalid(
                 "terminal attempt requires an assessment in the same transaction",

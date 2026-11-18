@@ -283,11 +283,11 @@ fn create_protects_existing_data_and_open_rejects_missing_or_future_schema() {
     assert_eq!(store.snapshot().unwrap(), before);
     store
         .connection
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", 99)
         .unwrap();
     assert!(matches!(
         SqliteStore::open(&path),
         Err(StoreError::Invalid(_))
     ));
-    assert_eq!(schema_version(&store.connection).unwrap(), 2);
+    assert_eq!(schema_version(&store.connection).unwrap(), 99);
 }

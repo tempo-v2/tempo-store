@@ -84,7 +84,7 @@ pub(super) fn load_snapshot(transaction: &Transaction<'_>) -> Result<Snapshot, S
     })
 }
 
-fn load_lines(transaction: &Transaction<'_>) -> Result<Vec<RepertoireLine>, StoreError> {
+pub(super) fn load_lines(transaction: &Transaction<'_>) -> Result<Vec<RepertoireLine>, StoreError> {
     let mut lines: Vec<_> = read_rows(
         transaction,
         "SELECT id, repertoire FROM repertoire_lines ORDER BY ordinal",

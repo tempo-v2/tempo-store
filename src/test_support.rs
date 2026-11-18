@@ -37,6 +37,10 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
             unix_ms: 100,
         },
         issued_miss_revision: snapshot.learning[&target].miss_revision,
+        mode: crate::ActivityMode::Test,
+        route: None,
+        first_introduction: false,
+        repertoire_name: None,
     }
 }
 pub(crate) fn successful_answer_writes(snapshot: &Snapshot) -> Vec<Write> {
