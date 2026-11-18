@@ -66,7 +66,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.mode != previous.mode
                 || record.route != previous.route
                 || record.first_introduction != previous.first_introduction
-                || record.repertoire_name != previous.repertoire_name
+                || record.exercise_name != previous.exercise_name
                 || record.lesson != previous.lesson
                 || (previous.acceptance.is_some() && record.acceptance != previous.acceptance)
                 || (record.mode == crate::ActivityMode::Teach && next.terminal.is_some())

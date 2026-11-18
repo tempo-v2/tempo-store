@@ -54,8 +54,10 @@ pub struct StoredAttempt {
     pub route: Option<String>,
     #[serde(default)]
     pub first_introduction: bool,
-    #[serde(default)]
-    pub repertoire_name: Option<String>,
+    /// Optional public display text fixed when the attempt is issued.
+    // Keep the historical SQLite JSON key readable by earlier binaries.
+    #[serde(default, rename = "repertoire_name")]
+    pub exercise_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lesson: Option<tempo_chess::RepertoireLesson>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +70,28 @@ mod tests {
     use crate::{Commit, Store, StoreError, Write};
     use tempo_chess::demo_catalog;
     use tempo_types::{AttemptId, MissRevision};
+
+    #[test]
+    fn the_display_name_round_trips_with_the_legacy_storage_key() {
+        let store = store(demo_catalog());
+        let mut record = issued_record(&store.snapshot().unwrap());
+        record.exercise_name = Some("A named exercise".into());
+        let mut raw = serde_json::to_value(&record).unwrap();
+        assert_eq!(raw["repertoire_name"], "A named exercise");
+        assert!(raw.get("exercise_name").is_none());
+        assert_eq!(
+            serde_json::from_value::<super::StoredAttempt>(raw.clone()).unwrap(),
+            record
+        );
+
+        raw.as_object_mut().unwrap().remove("repertoire_name");
+        assert_eq!(
+            serde_json::from_value::<super::StoredAttempt>(raw)
+                .unwrap()
+                .exercise_name,
+            None
+        );
+    }
 
     #[test]
     fn issuance_requires_current_miss_revision_and_consistent_presentation() {
