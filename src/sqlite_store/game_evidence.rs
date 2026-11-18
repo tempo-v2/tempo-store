@@ -1,7 +1,7 @@
 use super::{SqliteStore, database_error, load_study, row_values, save_snapshot};
 use crate::store_error::{conflict, invalid};
 use crate::transaction::stage_commit;
-use crate::{AcceptedGames, GameReceipt};
+use crate::{AcceptedGames, GameReceipt, PgnTiming};
 use crate::{
     Commit, ComparedGame, GameCommit, GameDeviation, GameHistory, GameHistoryEntry, StoreError,
     StudyScope, Write,
@@ -73,7 +73,25 @@ impl SqliteStore {
                     ],
                 )
                 .map_err(database_error)?;
-            if raw == 0 {
+            if raw == 0
+                && let Some(timing) = game.precise_pgn_timing()
+            {
+                let mut current = read_pgn_timing(&transaction, dataset, &game.id)?
+                    .ok_or_else(|| conflict("the stored PGN start time does not match"))?;
+                let previous_end = current.end_ms;
+                current.merge_end(&timing)?;
+                if current.end_ms != timing.end_ms {
+                    return Err(conflict(
+                        "PGN timing changed during comparison; retry the command",
+                    ));
+                }
+                if previous_end != current.end_ms {
+                    transaction.execute(
+                        "UPDATE games SET end_ms=?3 WHERE dataset_id=?1 AND source='pgn' AND id=?2",
+                        params![dataset, game.id, current.end_ms],
+                    ).map_err(database_error)?;
+                }
+            } else if raw == 0 {
                 let same: bool = transaction
                     .query_row(
                         "SELECT (mainline_signature IS NULL OR mainline_signature=?4)
@@ -112,6 +130,19 @@ impl SqliteStore {
                 )
                 .map_err(database_error)?;
             if compared == 0 {
+                if let Some(timing) = game.precise_pgn_timing()
+                    && let Some(end_ms) = timing.end_ms
+                {
+                    transaction
+                        .execute(
+                            "UPDATE game_comparisons
+                         SET summary=json_set(summary,'$.occurrence_end_ms',?3)
+                         WHERE dataset_id=?1 AND id=?2
+                           AND json_extract(summary,'$.occurrence_end_ms') IS NULL",
+                            params![dataset, entry.id, end_ms],
+                        )
+                        .map_err(database_error)?;
+                }
                 continue;
             }
             for observation in &entry.observations {
@@ -209,14 +240,16 @@ impl SqliteStore {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(database_error)?;
         let results = {
-            let mut statement = tx.prepare(
-                "SELECT comparison.dataset_id, comparison.id, comparison.summary, game.start_ms, game.end_ms
+            let mut statement = tx
+                .prepare(
+                    "SELECT comparison.dataset_id, comparison.id, comparison.summary, game.start_ms
                  FROM game_comparisons AS comparison
                  JOIN games AS game ON game.dataset_id=comparison.dataset_id
                     AND game.source=comparison.source AND game.id=comparison.game_id
                  WHERE comparison.dataset_id=(SELECT dataset_id FROM store_state WHERE singleton=1)
-                 ORDER BY comparison.ordinal DESC LIMIT 100"
-            ).map_err(database_error)?;
+                 ORDER BY comparison.ordinal DESC LIMIT 100",
+                )
+                .map_err(database_error)?;
             let records = statement
                 .query_map([], |row| {
                     Ok((
@@ -224,7 +257,6 @@ impl SqliteStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<u64>>(3)?,
-                        row.get::<_, Option<u64>>(4)?,
                     ))
                 })
                 .map_err(database_error)?;
@@ -236,8 +268,8 @@ impl SqliteStore {
                 .map_err(database_error)?;
             let mut results = Vec::new();
             for record in records {
-                let (dataset, comparison, summary, start_ms, end_ms) =
-                    record.map_err(database_error)?;
+                let (dataset, comparison, summary, start_ms) = record.map_err(database_error)?;
+                let summary: crate::GameSummary = row_values::decode(&summary)?;
                 let rows = misses
                     .query_map(params![dataset, comparison], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -250,12 +282,13 @@ impl SqliteStore {
                             target: TargetId(target),
                             version: ContentVersion(row_values::decode_counter(version)?),
                             start_ms,
-                            end_ms,
+                            end_ms: summary.occurrence_end_ms,
                         })
                     })
                     .collect::<Result<Vec<_>, StoreError>>()?;
                 results.push(GameHistoryEntry {
-                    summary: row_values::decode(&summary)?,
+                    comparison_id: comparison,
+                    summary,
                     deviations,
                 });
             }
@@ -278,6 +311,28 @@ impl SqliteStore {
     }
 }
 
+pub(super) fn read_pgn_timing(
+    connection: &Connection,
+    dataset: &str,
+    id: &str,
+) -> Result<Option<PgnTiming>, StoreError> {
+    connection
+        .query_row(
+            "SELECT mainline_signature, start_ms, end_ms FROM games
+         WHERE dataset_id=?1 AND source='pgn' AND id=?2 AND start_ms IS NOT NULL",
+            params![dataset, id],
+            |row| {
+                Ok(PgnTiming {
+                    mainline_signature: row.get(0)?,
+                    start_ms: row.get(1)?,
+                    end_ms: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(database_error)
+}
+
 fn read_receipt(
     connection: &Connection,
     dataset: &DatasetId,
@@ -298,5 +353,104 @@ fn read_receipt(
         }
         Some((_, accepted)) => row_values::decode(&accepted).map(Some),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GameRecord, GameSummary, Store};
+    use tempo_learning::LearningPolicy;
+
+    #[test]
+    fn a_late_timing_conflict_rolls_back_earlier_enrichment_and_the_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = DatasetId("games".into());
+        let mut store = SqliteStore::create(
+            dir.path().join("games.sqlite"),
+            dataset.clone(),
+            Default::default(),
+            crate::test_support::policy().settings(),
+        )
+        .unwrap();
+        let revision = store.snapshot().unwrap().revision;
+        let commit = || Commit {
+            expected_revision: revision,
+            expected_dataset: dataset.clone(),
+            writes: vec![],
+        };
+        let comparison = |id: &str, end_ms| ComparedGame {
+            game: GameRecord {
+                source: "pgn".into(),
+                id: id.into(),
+                url: None,
+                white: "learner".into(),
+                black: "opponent".into(),
+                start_ms: Some(100),
+                end_ms,
+                fetched_ms: 1000,
+                pgn: "game".into(),
+                mainline_signature: id.into(),
+            },
+            id: format!("comparison-{id}"),
+            summary: GameSummary {
+                source: "pgn".into(),
+                game_id: id.into(),
+                url: None,
+                repertoire_id: "book".into(),
+                learner: "learner".into(),
+                occurrence_end_ms: end_ms,
+                matches: 0,
+                deviations: 0,
+                first_deviation_ply: None,
+                coverage_gaps: 0,
+                opponent_deviations: 0,
+            },
+            observations: vec![],
+        };
+        let receipt = |id| GameReceipt {
+            id,
+            fingerprint: id,
+            report: "{}",
+        };
+        store
+            .commit_games(
+                commit(),
+                &[comparison("first", None), comparison("second", Some(200))],
+                None,
+                receipt("base"),
+            )
+            .unwrap();
+        let rejected = store.commit_games(
+            commit(),
+            &[
+                comparison("first", Some(250)),
+                comparison("second", Some(300)),
+            ],
+            None,
+            receipt("conflict"),
+        );
+        assert!(matches!(rejected, Err(StoreError::Conflict(_))));
+        assert_eq!(
+            store.pgn_timing(&dataset, "first").unwrap().unwrap().end_ms,
+            None
+        );
+        assert_eq!(
+            store
+                .pgn_timing(&dataset, "second")
+                .unwrap()
+                .unwrap()
+                .end_ms,
+            Some(200)
+        );
+        assert!(
+            store
+                .game_receipt(&dataset, "conflict", "conflict")
+                .unwrap()
+                .is_none()
+        );
+        let recent = store.game_history().unwrap();
+        assert_eq!(recent.results.len(), 2);
+        assert_eq!(recent.results[1].summary.occurrence_end_ms, None);
     }
 }

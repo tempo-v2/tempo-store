@@ -227,6 +227,14 @@ impl Store for SqliteStore {
         self.read_game_receipt(dataset, id, fingerprint)
     }
 
+    fn pgn_timing(
+        &self,
+        dataset: &DatasetId,
+        id: &str,
+    ) -> Result<Option<crate::PgnTiming>, StoreError> {
+        game_evidence::read_pgn_timing(&self.connection, &dataset.0, id)
+    }
+
     fn verified_game(
         &self,
         dataset: &DatasetId,
