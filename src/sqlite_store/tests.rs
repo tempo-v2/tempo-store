@@ -291,3 +291,83 @@ fn create_protects_existing_data_and_open_rejects_missing_or_future_schema() {
     ));
     assert_eq!(schema_version(&store.connection).unwrap(), 99);
 }
+
+#[test]
+fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
+    use crate::{ContentReceipt, ContentSource};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("document.sqlite");
+    let catalog = demo_catalog();
+    let mut store = create(&path, catalog.clone());
+    let before = store.snapshot().unwrap();
+    let (repertoire, target) = catalog
+        .items
+        .values()
+        .find_map(|item| match &item.definition.kind {
+            tempo_chess::ContentKind::Repertoire { repertoire, .. } => {
+                Some((repertoire.as_str(), &item.target))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut renamed = catalog.clone();
+    renamed.items.get_mut(target).unwrap().label = "Updated metadata".into();
+    let mut learning = before.learning[target].clone();
+    learning.first_introduced = Some(tempo_types::StudyDay(1));
+    let commit = Commit {
+        expected_dataset: before.dataset.clone(),
+        expected_revision: before.revision,
+        writes: vec![
+            Write::Catalog(renamed),
+            Write::Learning {
+                target: target.clone(),
+                state: learning,
+            },
+        ],
+    };
+    store
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER reject_receipt BEFORE INSERT ON content_receipts
+         BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;",
+        )
+        .unwrap();
+
+    let save = |store: &mut SqliteStore| {
+        store.commit_content(
+            commit.clone(),
+            Some(ContentSource::RepertoireDocument {
+                id: "source",
+                pgn: "1. e4 *",
+                repertoire_id: repertoire,
+            }),
+            Some(ContentReceipt {
+                request: "request",
+                reply: "{}",
+            }),
+        )
+    };
+    assert!(save(&mut store).is_err());
+    assert_eq!(store.snapshot().unwrap(), before);
+    assert_eq!(store.repertoire_document(repertoire).unwrap().pgn, None);
+    assert!(store.content_source_ids().unwrap().is_empty());
+    assert_eq!(store.content_receipt("request").unwrap(), None);
+    store
+        .connection
+        .execute("DROP TRIGGER reject_receipt", [])
+        .unwrap();
+    save(&mut store).unwrap();
+    assert_eq!(
+        store
+            .repertoire_document(repertoire)
+            .unwrap()
+            .pgn
+            .as_deref(),
+        Some("1. e4 *")
+    );
+    assert_eq!(
+        store.content_receipt("request").unwrap().as_deref(),
+        Some("{}")
+    );
+}
