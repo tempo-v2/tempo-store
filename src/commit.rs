@@ -81,6 +81,8 @@ mod tests {
             route: None,
             first_introduction: false,
             repertoire_name: None,
+            lesson: None,
+            acceptance: None,
         };
         store
             .commit(Commit {

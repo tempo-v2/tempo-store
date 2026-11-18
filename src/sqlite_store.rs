@@ -3,7 +3,8 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentReceipt, ContentSource, Snapshot, Store, StoreError, StudyScope, Write,
+    Commit, ContentReceipt, ContentSource, Receipt, ReceiptResult, Snapshot, Store, StoreError,
+    StoredAttempt, StudyScope, Write,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -11,7 +12,7 @@ use rusqlite::{
 use std::{path::Path, time::Duration};
 use tempo_chess::{Catalog, ContentItem};
 use tempo_learning::SchedulerSettings;
-use tempo_types::{ContentVersion, DatasetId, Revision, TargetId};
+use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
 mod load_snapshot;
 mod load_study;
@@ -21,8 +22,9 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const SCHEMA: &str = include_str!("sqlite_store/schema.sql");
+const DAILY_ALLOWANCE_SCHEMA: &str = include_str!("sqlite_store/daily_allowances.sql");
 
 /// An atomic, file-backed implementation of [`Store`].
 ///
@@ -88,6 +90,9 @@ impl SqliteStore {
         }
         transaction.execute_batch(SCHEMA).map_err(database_error)?;
         transaction
+            .execute_batch(DAILY_ALLOWANCE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -130,9 +135,21 @@ impl SqliteStore {
     /// Open an existing database using the current schema. A missing file is an error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = file_path(path.as_ref())?;
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
+        if schema_version(&connection)? == 2 {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+            if schema_version(&tx)? == 2 {
+                tx.execute_batch(DAILY_ALLOWANCE_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                    .map_err(database_error)?;
+            }
+            tx.commit().map_err(database_error)?;
+        }
         let version = schema_version(&connection)?;
         if version != SCHEMA_VERSION {
             return Err(invalid(&format!(
@@ -164,6 +181,17 @@ impl Store for SqliteStore {
         Ok(state)
     }
 
+    fn stored_attempt(&self, id: &AttemptId) -> Result<Option<StoredAttempt>, StoreError> {
+        let record: Option<String> = self
+            .connection
+            .query_row("SELECT record FROM attempts WHERE id=?1", [&id.0], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(database_error)?;
+        record.as_deref().map(row_values::decode).transpose()
+    }
+
     fn issued_item(
         &self,
         dataset: &DatasetId,
@@ -175,6 +203,73 @@ impl Store for SqliteStore {
             params![dataset.0, target.0, version.0.to_be_bytes().as_slice()], |row| row.get(0)
         ).optional().map_err(database_error)?;
         item.as_deref().map(row_values::decode).transpose()
+    }
+
+    fn tactics_extra(&self, dataset: &DatasetId, day: StudyDay) -> Result<usize, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT extra FROM daily_tactics_allowances WHERE dataset_id=?1 AND study_day=?2",
+                params![dataset.0, day.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|extra| extra.unwrap_or(0))
+            .map_err(database_error)
+    }
+
+    fn extend_tactics_allowance(
+        &mut self,
+        dataset: &DatasetId,
+        revision: Revision,
+        day: StudyDay,
+        increase: usize,
+        receipt: &Receipt,
+    ) -> Result<(), StoreError> {
+        if increase == 0
+            || receipt.id.0.is_empty()
+            || !matches!(receipt.result, ReceiptResult::TacticsAllowance { .. })
+        {
+            return Err(invalid("expected a positive allowance and its receipt"));
+        }
+        let next = revision
+            .0
+            .checked_add(1)
+            .ok_or_else(|| invalid("store revision exhausted"))?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE store_state SET revision=?1 WHERE singleton=1 AND dataset_id=?2
+             AND revision=?3 AND active_attempt_id IS NULL",
+                params![
+                    next.to_be_bytes().as_slice(),
+                    dataset.0,
+                    revision.0.to_be_bytes().as_slice()
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(conflict("study changed before the allowance was applied"));
+        }
+        tx.execute(
+            "INSERT INTO daily_tactics_allowances VALUES (?1, ?2, ?3)
+             ON CONFLICT(dataset_id, study_day) DO UPDATE SET extra=extra+excluded.extra",
+            params![dataset.0, day.0, increase],
+        )
+        .map_err(database_error)?;
+        tx.execute(
+            "INSERT INTO receipts VALUES (?1, NULL, ?2, ?3)",
+            params![
+                receipt.id.0,
+                receipt.command,
+                row_values::encode(&receipt.result)?
+            ],
+        )
+        .map_err(database_error)?;
+        tx.commit().map_err(database_error)?;
+        Ok(())
     }
 
     fn content_state(&self) -> Result<(Snapshot, Revision), StoreError> {

@@ -41,6 +41,8 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
         route: None,
         first_introduction: false,
         repertoire_name: None,
+        lesson: None,
+        acceptance: None,
     }
 }
 pub(crate) fn successful_answer_writes(snapshot: &Snapshot) -> Vec<Write> {

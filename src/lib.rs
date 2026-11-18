@@ -37,5 +37,5 @@ pub use snapshot::Snapshot;
 pub use sqlite_store::SqliteStore;
 pub use store::{ContentReceipt, ContentSource, Store, StudyScope};
 pub use store_error::StoreError;
-pub use stored_attempt::{ActivityMode, StoredAttempt};
+pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, StoredAttempt};
 pub use write::Write;

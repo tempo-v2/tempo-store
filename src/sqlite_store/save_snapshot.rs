@@ -38,18 +38,29 @@ pub(super) fn save_snapshot(
         }
     }
     for (id, record) in &next.attempts {
-        if previous.and_then(|old| old.attempts.get(id)) != Some(record) {
-            let attempt = &record.attempt;
+        let old = previous.and_then(|old| old.attempts.get(id));
+        if old == Some(record) {
+            continue;
+        }
+        let attempt = &record.attempt;
+        let payload = encode(record)?;
+        if old.is_some() {
             transaction
                 .execute(
-                    "INSERT INTO attempts VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(id) DO UPDATE SET record = excluded.record",
+                    "UPDATE attempts SET record=?2 WHERE id=?1",
+                    params![id.0, payload],
+                )
+                .map_err(database_error)?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO attempts VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         id.0,
                         attempt.dataset.0,
                         attempt.target.0,
                         attempt.content_version.0.to_be_bytes().as_slice(),
-                        encode(record)?,
+                        payload
                     ],
                 )
                 .map_err(database_error)?;
@@ -191,7 +202,7 @@ fn save_outcomes(
         if previous.is_none_or(|old| !old.receipts.contains_key(id)) {
             let attempt = match &receipt.result {
                 ReceiptResult::Study(result) => Some(&result.attempt.id.0),
-                ReceiptResult::External { .. } => None,
+                ReceiptResult::External { .. } | ReceiptResult::TacticsAllowance { .. } => None,
             };
             transaction
                 .execute(

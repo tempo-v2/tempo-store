@@ -13,6 +13,31 @@ pub(super) fn validate_new_outcomes(
     assessments: &[AssessmentRecord],
     receipts: &[Receipt],
 ) -> Result<(), StoreError> {
+    for (id, attempt) in &staged.attempts {
+        let Some(acceptance) = &attempt.acceptance else {
+            continue;
+        };
+        if previous
+            .attempts
+            .get(id)
+            .and_then(|old| old.acceptance.as_ref())
+            .is_some()
+        {
+            continue;
+        }
+        if attempt.mode == crate::ActivityMode::Teach {
+            let current = &staged.learning[&attempt.attempt.target];
+            if current.taught_at != Some(acceptance.at)
+                || current.scheduler_memory.is_some()
+                || current.last_review_at.is_some()
+                || !current.introduced
+            {
+                return Err(invalid(
+                    "teaching and its learning transition must commit together",
+                ));
+            }
+        }
+    }
     let mut targets = BTreeSet::new();
     for record in assessments {
         if !targets.insert(record.target.clone()) {
@@ -86,6 +111,11 @@ pub(super) fn validate_new_outcomes(
                         ));
                     }
                 }
+            }
+            ReceiptResult::TacticsAllowance { .. } => {
+                return Err(invalid(
+                    "allowance receipts require a daily allowance transaction",
+                ));
             }
             ReceiptResult::External { target, transition } => {
                 if !assessments.iter().any(|record| {

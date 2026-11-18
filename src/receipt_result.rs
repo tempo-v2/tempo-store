@@ -18,6 +18,9 @@ use tempo_types::TargetId;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptResult {
     Study(AnswerResult),
+    TacticsAllowance {
+        reply: String,
+    },
     External {
         target: TargetId,
         transition: Transition,

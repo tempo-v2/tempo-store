@@ -14,6 +14,22 @@ pub enum ActivityMode {
     Practice,
 }
 
+/// Accepted activity evidence, including the reason for the first Again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityAcceptance {
+    pub at: StudyTime,
+    pub kind: AcceptanceKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AcceptanceKind {
+    Teaching,
+    Recall,
+    WrongMove { uci: String, decision_index: usize },
+    Revealed { decision_index: usize },
+}
+
 /// A Study attempt plus the learning context fixed when it was issued.
 ///
 /// # When to use
@@ -40,6 +56,10 @@ pub struct StoredAttempt {
     pub first_introduction: bool,
     #[serde(default)]
     pub repertoire_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lesson: Option<tempo_chess::RepertoireLesson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<ActivityAcceptance>,
 }
 
 #[cfg(test)]

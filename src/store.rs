@@ -1,8 +1,10 @@
 //! Store and its usage scenarios.
 
-use crate::{Commit, Snapshot, StoreError};
+use crate::{Commit, Receipt, Snapshot, StoreError, StoredAttempt, store_error::invalid};
 use tempo_chess::ContentItem;
-use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, SubmissionId, TargetId};
+use tempo_types::{
+    AttemptId, ContentVersion, DatasetId, Revision, StudyDay, SubmissionId, TargetId,
+};
 
 /// Current study reads exclude unrelated attempts and their outcomes.
 #[derive(Clone, Copy, Default)]
@@ -51,6 +53,24 @@ pub trait Store {
         self.commit(commit)
     }
 
+    fn tactics_extra(&self, _dataset: &DatasetId, _day: StudyDay) -> Result<usize, StoreError> {
+        Ok(0)
+    }
+
+    /// Persist a day-scoped tactics allowance and receipt in one transaction.
+    fn extend_tactics_allowance(
+        &mut self,
+        _dataset: &DatasetId,
+        _revision: Revision,
+        _day: StudyDay,
+        _increase: usize,
+        _receipt: &Receipt,
+    ) -> Result<(), StoreError> {
+        Err(invalid(
+            "this Store does not support daily tactics allowances",
+        ))
+    }
+
     fn content_state(&self) -> Result<(Snapshot, Revision), StoreError> {
         let state = self.snapshot()?;
         let revision = state.revision;
@@ -69,6 +89,10 @@ pub trait Store {
         _receipt: Option<ContentReceipt<'_>>,
     ) -> Result<Revision, StoreError> {
         self.commit(commit)
+    }
+
+    fn stored_attempt(&self, id: &AttemptId) -> Result<Option<StoredAttempt>, StoreError> {
+        Ok(self.snapshot()?.attempts.remove(id))
     }
 
     fn issued_item(

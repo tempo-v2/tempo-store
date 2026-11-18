@@ -42,6 +42,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || attempt.content_version != item.version
                 || attempt.revision != Revision(0)
                 || attempt.terminal.is_some()
+                || record.acceptance.is_some()
                 || attempt.status != AttemptStatus::Active
                 || record.issued_miss_revision != learning.miss_revision
             {
@@ -66,6 +67,8 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.route != previous.route
                 || record.first_introduction != previous.first_introduction
                 || record.repertoire_name != previous.repertoire_name
+                || record.lesson != previous.lesson
+                || (previous.acceptance.is_some() && record.acceptance != previous.acceptance)
                 || (record.mode == crate::ActivityMode::Teach && next.terminal.is_some())
                 || old.status != AttemptStatus::Active
                 || old.revision.0.checked_add(1) != Some(next.revision.0)
@@ -74,6 +77,33 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 return Err(conflict(
                     "attempt identity, revision or terminal outcome changed illegally",
                 ));
+            }
+            if let Some(acceptance) = &record.acceptance {
+                use crate::{AcceptanceKind, ActivityMode};
+                use tempo_types::Grade;
+                if acceptance.at.unix_ms < record.issued_at.unix_ms
+                    || acceptance.at.day < record.issued_at.day
+                {
+                    return Err(invalid("activity acceptance precedes issuance"));
+                }
+                let coherent = match &acceptance.kind {
+                    AcceptanceKind::Teaching => {
+                        record.mode == ActivityMode::Teach
+                            && next.status == AttemptStatus::Complete
+                            && next.terminal.is_none()
+                    }
+                    AcceptanceKind::Recall => {
+                        record.mode != ActivityMode::Teach && next.terminal == Some(Grade::Good)
+                    }
+                    AcceptanceKind::WrongMove { .. } | AcceptanceKind::Revealed { .. } => {
+                        record.mode != ActivityMode::Teach && next.terminal == Some(Grade::Again)
+                    }
+                };
+                if !coherent {
+                    return Err(invalid(
+                        "activity evidence is inconsistent with its outcome",
+                    ));
+                }
             }
             state.attempts.insert(next.id.clone(), record);
         }
