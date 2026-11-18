@@ -174,7 +174,16 @@ impl SqliteStore {
     }
 }
 
+mod tactic_page;
+
 impl Store for SqliteStore {
+    fn tactic_page(
+        &self,
+        query: crate::TacticPageQuery<'_>,
+    ) -> Result<crate::TacticPage, StoreError> {
+        self.read_tactic_page(query)
+    }
+
     fn snapshot(&self) -> Result<Snapshot, StoreError> {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
