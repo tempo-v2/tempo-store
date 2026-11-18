@@ -24,7 +24,8 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+const PORTABLE_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/portable_evidence.sql");
 const GAME_CORRECTIONS_SCHEMA: &str = include_str!("sqlite_store/game_corrections.sql");
 const REPERTOIRE_RESET_SCHEMA: &str = include_str!("sqlite_store/repertoire_resets.sql");
 const GAME_REVIEW_BACKFILL: &str = include_str!("sqlite_store/game_review_backfill.sql");
@@ -115,6 +116,9 @@ impl SqliteStore {
             .execute_batch(GAME_CORRECTIONS_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(PORTABLE_EVIDENCE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -172,7 +176,7 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2..=7) {
+        if matches!(schema_version(&connection)?, 2..=8) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -208,6 +212,12 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 7 {
                 tx.execute_batch(GAME_CORRECTIONS_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 8)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 8 {
+                tx.execute_batch(PORTABLE_EVIDENCE_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
@@ -253,7 +263,11 @@ impl Store for SqliteStore {
         repertoire: &str,
     ) -> Result<Option<u64>, StoreError> {
         self.connection.query_row(
-            "SELECT max(reset_at_ms) FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2",
+            "SELECT max(reset_at_ms) FROM (
+                SELECT reset_at_ms FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2
+                UNION ALL
+                SELECT reset_at_ms FROM restored_reset_boundaries WHERE dataset_id=?1 AND repertoire_id=?2
+            )",
             params![dataset.0, repertoire],
             |row| row.get(0),
         ).map_err(database_error)
@@ -345,7 +359,7 @@ impl Store for SqliteStore {
         position: &str,
     ) -> Result<bool, StoreError> {
         self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM game_choice_resolutions WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND position=?4 UNION SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position=?4)",
+            "SELECT EXISTS(SELECT 1 FROM game_choice_boundaries WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND position=?4 UNION SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position=?4)",
             params![dataset.0, source, game_id, position], |row| row.get(0)
         ).map_err(database_error)
     }
@@ -364,29 +378,26 @@ impl Store for SqliteStore {
     fn game_failures(&self, dataset: &DatasetId) -> Result<Vec<crate::GameFailureKey>, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(database_error)?;
-        row_values::read_selected(
-            &tx,
-            "SELECT source,game_id,target_id,version,chosen_position FROM game_failures WHERE dataset_id=?1 ORDER BY source,game_id,target_id",
-            [&dataset.0],
-            |row| {
-                Ok(crate::GameFailureKey {
-                    source: row.get(0).map_err(database_error)?,
-                    game_id: row.get(1).map_err(database_error)?,
-                    target: TargetId(row.get(2).map_err(database_error)?),
-                    version: ContentVersion(row_values::decode_counter(
-                        row.get(3).map_err(database_error)?,
-                    )?),
-                    chosen_position: row.get(4).map_err(database_error)?,
-                })
-            },
-        )
+        game_evidence::read_game_failures(&tx, dataset)
     }
 
-    fn restore_with_game_failures(
+    fn portable_state(&self) -> Result<(Snapshot, crate::PortableGameEvidence), StoreError> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(database_error)?;
+        let snapshot = load_snapshot(&tx)?;
+        let evidence = game_evidence::read_portable_evidence(&tx, &snapshot.dataset)?;
+        tx.commit().map_err(database_error)?;
+        Ok((snapshot, evidence))
+    }
+
+    fn restore_with_game_evidence(
         &mut self,
         commit: Commit,
-        keys: &[crate::GameFailureKey],
+        evidence: &crate::PortableGameEvidence,
     ) -> Result<Revision, StoreError> {
+        if !matches!(commit.writes.as_slice(), [Write::Restore { .. }]) {
+            return Err(invalid("portable evidence requires a dataset restore"));
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -394,9 +405,7 @@ impl Store for SqliteStore {
         let previous = load_snapshot(&tx)?;
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&tx, Some(&previous), &next)?;
-        for key in keys {
-            game_evidence::save_failure(&tx, &next.dataset, key, None)?;
-        }
+        game_evidence::save_portable_evidence(&tx, &next, evidence)?;
         tx.commit().map_err(database_error)?;
         Ok(next.revision)
     }

@@ -259,6 +259,16 @@ pub trait Store {
         Ok(vec![])
     }
 
+    /// Read catalog, Learning and game acceptance facts at one revision.
+    fn portable_state(&self) -> Result<(Snapshot, crate::PortableGameEvidence), StoreError> {
+        let snapshot = self.snapshot()?;
+        let evidence = crate::PortableGameEvidence {
+            game_failures: self.game_failures(&snapshot.dataset)?,
+            ..crate::PortableGameEvidence::default()
+        };
+        Ok((snapshot, evidence))
+    }
+
     fn stored_game(
         &self,
         _dataset: &DatasetId,
@@ -277,13 +287,16 @@ pub trait Store {
         Err(invalid("this Store does not support game evidence"))
     }
 
-    fn restore_with_game_failures(
+    /// Restore a new dataset and its acceptance boundaries in one transaction.
+    fn restore_with_game_evidence(
         &mut self,
         commit: Commit,
-        keys: &[crate::GameFailureKey],
+        evidence: &crate::PortableGameEvidence,
     ) -> Result<Revision, StoreError> {
-        if !keys.is_empty() {
-            return Err(invalid("this Store does not support game failures"));
+        if !evidence.is_empty() {
+            return Err(invalid(
+                "this Store does not support portable game evidence",
+            ));
         }
         self.commit(commit)
     }

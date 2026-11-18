@@ -7,7 +7,11 @@ use crate::{
 };
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use std::collections::BTreeMap;
+use tempo_chess::ContentKind;
+use tempo_learning::{AssessmentSource, LearningEffect};
 use tempo_types::DatasetId;
+use tempo_types::{ContentVersion, Grade, TargetId};
 
 pub(super) fn game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::GameRecord> {
     Ok(crate::GameRecord {
@@ -47,6 +51,199 @@ pub(super) fn save_failure(
     Ok(())
 }
 
+pub(super) fn read_game_failures(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+) -> Result<Vec<crate::GameFailureKey>, StoreError> {
+    row_values::read_selected(
+        tx,
+        "SELECT source,game_id,target_id,version,chosen_position FROM game_failures
+         WHERE dataset_id=?1 ORDER BY source,game_id,target_id",
+        [&dataset.0],
+        |row| {
+            Ok(crate::GameFailureKey {
+                source: row.get(0).map_err(database_error)?,
+                game_id: row.get(1).map_err(database_error)?,
+                target: TargetId(row.get(2).map_err(database_error)?),
+                version: ContentVersion(row_values::decode_counter(
+                    row.get(3).map_err(database_error)?,
+                )?),
+                chosen_position: row.get(4).map_err(database_error)?,
+            })
+        },
+    )
+}
+
+pub(super) fn read_portable_evidence(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+) -> Result<crate::PortableGameEvidence, StoreError> {
+    let game_failures = read_game_failures(tx, dataset)?;
+    let repertoire_reset_boundaries = row_values::read_selected(
+        tx,
+        "SELECT repertoire_id,max(reset_at_ms) FROM (
+            SELECT repertoire_id,reset_at_ms FROM repertoire_resets WHERE dataset_id=?1
+            UNION ALL
+            SELECT repertoire_id,reset_at_ms FROM restored_reset_boundaries WHERE dataset_id=?1
+         ) GROUP BY repertoire_id",
+        [&dataset.0],
+        |row| {
+            Ok((
+                row.get(0).map_err(database_error)?,
+                row.get(1).map_err(database_error)?,
+            ))
+        },
+    )?;
+    let resolved_game_choices = row_values::read_selected(
+        tx,
+        "SELECT DISTINCT source,game_id,position FROM game_choice_boundaries
+         WHERE dataset_id=?1 ORDER BY source,game_id,position",
+        [&dataset.0],
+        |row| {
+            Ok(crate::ResolvedGameChoice {
+                source: row.get(0).map_err(database_error)?,
+                game_id: row.get(1).map_err(database_error)?,
+                position: row.get(2).map_err(database_error)?,
+            })
+        },
+    )?;
+    Ok(crate::PortableGameEvidence {
+        game_failures,
+        repertoire_reset_boundaries,
+        resolved_game_choices,
+    })
+}
+
+pub(super) fn save_portable_evidence(
+    tx: &Transaction<'_>,
+    next: &crate::Snapshot,
+    evidence: &crate::PortableGameEvidence,
+) -> Result<(), StoreError> {
+    let repertoires: std::collections::BTreeSet<_> = next
+        .catalog
+        .items
+        .values()
+        .filter_map(|item| match &item.definition.kind {
+            ContentKind::Repertoire { repertoire, .. } => Some(repertoire),
+            ContentKind::Tactic { .. } => None,
+        })
+        .collect();
+    for (repertoire, at_ms) in &evidence.repertoire_reset_boundaries {
+        if !repertoires.contains(repertoire) || i64::try_from(*at_ms).is_err() {
+            return Err(invalid("invalid portable repertoire reset boundary"));
+        }
+        tx.execute(
+            "INSERT INTO restored_reset_boundaries VALUES (?1,?2,?3)",
+            params![next.dataset.0, repertoire, at_ms],
+        )
+        .map_err(database_error)?;
+    }
+    for key in &evidence.game_failures {
+        if key.source.is_empty()
+            || key.game_id.is_empty()
+            || key.chosen_position.as_ref().is_some_and(String::is_empty)
+            || next
+                .catalog
+                .items
+                .get(&key.target)
+                .is_none_or(|item| key.version.0 == 0 || item.version.0 < key.version.0)
+        {
+            return Err(invalid("invalid portable game failure provenance"));
+        }
+        save_failure(tx, &next.dataset, key, None)?;
+    }
+    for choice in &evidence.resolved_game_choices {
+        if choice.source.is_empty() || choice.game_id.is_empty() || choice.position.is_empty() {
+            return Err(invalid("invalid portable game choice resolution"));
+        }
+        tx.execute(
+            "INSERT INTO restored_game_choices VALUES (?1,?2,?3,?4)",
+            params![
+                next.dataset.0,
+                choice.source,
+                choice.game_id,
+                choice.position
+            ],
+        )
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+fn failure_key(
+    entry: &ComparedGame,
+    assessment: &crate::AssessmentRecord,
+) -> crate::GameFailureKey {
+    crate::GameFailureKey {
+        source: entry.game.source.clone(),
+        game_id: entry.game.id.clone(),
+        target: assessment.target.clone(),
+        version: assessment.content_version,
+        chosen_position: entry
+            .resolved_choice
+            .as_ref()
+            .map(|(_, _, position)| position.clone()),
+    }
+}
+
+fn validate_game_transitions(
+    previous: &crate::Snapshot,
+    writes: &[Write],
+    games: &[ComparedGame],
+) -> Result<(), StoreError> {
+    let mut final_states = BTreeMap::new();
+    for entry in games {
+        for assessment in &entry.failures {
+            let item = previous
+                .catalog
+                .items
+                .get(&assessment.target)
+                .filter(|item| item.active() && item.version == assessment.content_version)
+                .ok_or_else(|| invalid("game failure does not address an active answer"))?;
+            let prior = final_states
+                .get(&assessment.target)
+                .copied()
+                .unwrap_or(&previous.learning[&assessment.target]);
+            let state = &assessment.transition.state;
+            if entry.game.source.is_empty()
+                || entry.game.id.is_empty()
+                || assessment.key != failure_key(entry, assessment).assessment_key()
+                || assessment.dataset != previous.dataset
+                || assessment.input.grade != Grade::Again
+                || !matches!(&assessment.input.source, AssessmentSource::Game { source, game_id, .. }
+                    if *source == entry.game.source && *game_id == entry.game.id)
+                || assessment.transition.effect != LearningEffect::MissRecorded
+                || state.last_review_at != Some(assessment.input.accepted_at)
+                || state
+                    .correction
+                    .as_ref()
+                    .is_none_or(|correction| correction.answer_version != item.version)
+                || prior.miss_revision.0.checked_add(1) != Some(state.miss_revision.0)
+                || prior.scheduled_reviews.checked_add(1) != Some(state.scheduled_reviews)
+            {
+                return Err(invalid("invalid game failure assessment"));
+            }
+            final_states.insert(assessment.target.clone(), state);
+        }
+    }
+    for write in writes {
+        let Write::Learning { target, state } = write else {
+            return Err(invalid(
+                "game evidence only accepts associated learning facts",
+            ));
+        };
+        if final_states.remove(target) != Some(state) {
+            return Err(invalid("game assessment and final learning write disagree"));
+        }
+    }
+    if !final_states.is_empty() {
+        return Err(invalid(
+            "game assessment is missing its final learning write",
+        ));
+    }
+    Ok(())
+}
+
 impl SqliteStore {
     pub(super) fn save_game_evidence(
         &mut self,
@@ -55,21 +252,13 @@ impl SqliteStore {
         successful_refresh_ms: Option<u64>,
         receipt: GameReceipt<'_>,
     ) -> Result<AcceptedGames, StoreError> {
-        if commit
-            .writes
-            .iter()
-            .any(|write| !matches!(write, Write::Learning { .. }))
-        {
-            return Err(invalid(
-                "game evidence only accepts associated learning facts",
-            ));
-        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let scope = StudyScope {
-            catalog: !commit.writes.is_empty(),
+            catalog: !commit.writes.is_empty()
+                || games.iter().any(|entry| !entry.failures.is_empty()),
             ..StudyScope::default()
         };
         let previous = load_study::load_study(&transaction, scope)?;
@@ -86,6 +275,8 @@ impl SqliteStore {
         {
             return Err(conflict("repertoire or learning changed during comparison"));
         }
+
+        validate_game_transitions(&previous, &commit.writes, games)?;
 
         let dataset = &previous.dataset.0;
         let mut result = GameCommit::default();
@@ -163,34 +354,10 @@ impl SqliteStore {
                     .map_err(database_error)?;
             }
             for assessment in &entry.failures {
-                let valid = previous
-                    .catalog
-                    .items
-                    .get(&assessment.target)
-                    .is_some_and(|item| {
-                        item.active() && item.version == assessment.content_version
-                    });
-                if !valid
-                    || assessment.dataset != previous.dataset
-                    || assessment.input.grade != tempo_types::Grade::Again
-                    || !matches!(&assessment.input.source, tempo_learning::AssessmentSource::Game { source, game_id, .. }
-                        if *source == game.source && *game_id == game.id)
-                {
-                    return Err(invalid("game failure does not address an active answer"));
-                }
                 save_failure(
                     &transaction,
                     &previous.dataset,
-                    &crate::GameFailureKey {
-                        source: game.source.clone(),
-                        game_id: game.id.clone(),
-                        target: assessment.target.clone(),
-                        version: assessment.content_version,
-                        chosen_position: entry
-                            .resolved_choice
-                            .as_ref()
-                            .map(|(_, _, position)| position.clone()),
-                    },
+                    &failure_key(entry, assessment),
                     Some(assessment),
                 )?;
             }
@@ -343,7 +510,7 @@ impl SqliteStore {
                 if !summary.choices.is_empty() {
                     let resolved: Vec<String> = row_values::read_selected(
                         &tx,
-                        "SELECT position FROM game_choice_resolutions WHERE dataset_id=?1 AND source=?2 AND game_id=?3 UNION SELECT chosen_position FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position IS NOT NULL",
+                        "SELECT position FROM game_choice_boundaries WHERE dataset_id=?1 AND source=?2 AND game_id=?3 UNION SELECT chosen_position FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position IS NOT NULL",
                         params![dataset, summary.source, summary.game_id],
                         |row| row.get(0).map_err(database_error),
                     )?;
@@ -430,24 +597,8 @@ mod tests {
     use crate::{GameRecord, GameSummary, Store};
     use tempo_learning::LearningPolicy;
 
-    #[test]
-    fn a_late_timing_conflict_rolls_back_earlier_enrichment_and_the_receipt() {
-        let dir = tempfile::tempdir().unwrap();
-        let dataset = DatasetId("games".into());
-        let mut store = SqliteStore::create(
-            dir.path().join("games.sqlite"),
-            dataset.clone(),
-            Default::default(),
-            crate::test_support::policy().settings(),
-        )
-        .unwrap();
-        let revision = store.snapshot().unwrap().revision;
-        let commit = || Commit {
-            expected_revision: revision,
-            expected_dataset: dataset.clone(),
-            writes: vec![],
-        };
-        let comparison = |id: &str, end_ms| ComparedGame {
+    fn comparison(id: &str, end_ms: Option<u64>) -> ComparedGame {
+        ComparedGame {
             game: GameRecord {
                 source: "pgn".into(),
                 id: id.into(),
@@ -481,6 +632,152 @@ mod tests {
                 disagreements: vec![],
             },
             observations: vec![],
+        }
+    }
+
+    #[test]
+    fn game_batch_requires_the_final_transition_and_canonical_event_identity() {
+        use tempo_learning::{AssessmentInput, DailyLearning};
+        use tempo_types::{StudyDay, StudyTime};
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = DailyLearning::default();
+        let dataset: DatasetId = "games".into();
+        let mut store = SqliteStore::create(
+            dir.path().join("games.sqlite"),
+            dataset.clone(),
+            tempo_chess::demo_catalog(),
+            policy.settings(),
+        )
+        .unwrap();
+        let before = store.snapshot().unwrap();
+        let target = TargetId::from("r1:p1");
+        let version = before.catalog.items[&target].version;
+        let mut prior = before.learning[&target].clone();
+        let mut games = [comparison("first", None), comparison("second", None)];
+        for entry in &mut games {
+            let input = AssessmentInput {
+                source: AssessmentSource::Game {
+                    source: entry.game.source.clone(),
+                    game_id: entry.game.id.clone(),
+                    played_date: None,
+                    started_at_ms: entry.game.start_ms,
+                    ended_at_ms: entry.game.end_ms,
+                },
+                grade: Grade::Again,
+                accepted_at: StudyTime {
+                    day: StudyDay(1),
+                    unix_ms: 86_400_000,
+                },
+            };
+            let transition =
+                DailyLearning::assess_game(&policy, &prior, &input, version, None).unwrap();
+            prior = transition.state.clone();
+            let mut record = crate::AssessmentRecord {
+                key: crate::AssessmentKey::External {
+                    provider: "placeholder".into(),
+                    event_id: "placeholder".into(),
+                },
+                dataset: dataset.clone(),
+                target: target.clone(),
+                content_version: version,
+                input,
+                transition,
+            };
+            record.key = failure_key(entry, &record).assessment_key();
+            entry.failures.push(record);
+        }
+        let commit = |writes| Commit {
+            expected_revision: before.revision,
+            expected_dataset: dataset.clone(),
+            writes,
+        };
+        let write = |state| Write::Learning {
+            target: target.clone(),
+            state,
+        };
+        let receipt = || GameReceipt {
+            id: "batch",
+            fingerprint: "batch",
+            report: "{}",
+        };
+        for writes in [
+            vec![],
+            vec![write(before.learning[&target].clone())],
+            vec![write(games[0].failures[0].transition.state.clone())],
+            vec![write(prior.clone()), write(prior.clone())],
+        ] {
+            assert!(matches!(
+                store.commit_games(commit(writes), &games, Some(123), receipt()),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+        let mut mismatched = games.clone();
+        mismatched[1].failures[0].key = games[0].failures[0].key.clone();
+        assert!(matches!(
+            store.commit_games(
+                commit(vec![write(prior.clone())]),
+                &mismatched,
+                Some(123),
+                receipt()
+            ),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert!(
+            store
+                .stored_game(&dataset, "pgn", "first")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.game_history().unwrap().results.is_empty());
+        assert_eq!(
+            store.game_history().unwrap().last_successful_refresh_ms,
+            None
+        );
+        assert!(store.game_failures(&dataset).unwrap().is_empty());
+        assert!(
+            store
+                .game_receipt(&dataset, "batch", "batch")
+                .unwrap()
+                .is_none()
+        );
+
+        let accepted = store
+            .commit_games(
+                commit(vec![write(prior.clone())]),
+                &games,
+                Some(123),
+                receipt(),
+            )
+            .unwrap();
+        assert_eq!(accepted.counts.new_games, 2);
+        assert_eq!(store.snapshot().unwrap().learning[&target], prior);
+        assert_eq!(store.game_failures(&dataset).unwrap().len(), 2);
+        let replay = store
+            .commit_games(commit(vec![write(prior)]), &games, Some(123), receipt())
+            .unwrap();
+        assert_eq!(replay.report, accepted.report);
+        assert_eq!(replay.counts.new_games, 2);
+        assert_eq!(store.game_failures(&dataset).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_late_timing_conflict_rolls_back_earlier_enrichment_and_the_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = DatasetId("games".into());
+        let mut store = SqliteStore::create(
+            dir.path().join("games.sqlite"),
+            dataset.clone(),
+            Default::default(),
+            crate::test_support::policy().settings(),
+        )
+        .unwrap();
+        let revision = store.snapshot().unwrap().revision;
+        let commit = || Commit {
+            expected_revision: revision,
+            expected_dataset: dataset.clone(),
+            writes: vec![],
         };
         let receipt = |id| GameReceipt {
             id,
