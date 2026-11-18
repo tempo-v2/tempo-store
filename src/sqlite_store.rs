@@ -3,27 +3,29 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentReceipt, ContentSource, Receipt, ReceiptResult, RepertoireDocument, Snapshot,
-    Store, StoreError, StoredAttempt, StudyScope, Write,
+    Commit, ContentReceipt, ContentSource, Receipt, ReceiptResult, RepertoireDocument,
+    RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope, Write,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use std::{path::Path, time::Duration};
 use tempo_chess::{Catalog, ContentItem};
-use tempo_learning::SchedulerSettings;
+use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
 mod game_evidence;
 mod load_snapshot;
 mod load_study;
+mod repertoire_resets;
 mod row_values;
 mod save_snapshot;
 
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
+const REPERTOIRE_RESET_SCHEMA: &str = include_str!("sqlite_store/repertoire_resets.sql");
 const GAME_REVIEW_BACKFILL: &str = include_str!("sqlite_store/game_review_backfill.sql");
 const GAME_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/game_evidence.sql");
 const SCHEMA: &str = include_str!("sqlite_store/schema.sql");
@@ -106,6 +108,9 @@ impl SqliteStore {
             .execute_batch(GAME_REVIEW_BACKFILL)
             .map_err(database_error)?;
         transaction
+            .execute_batch(REPERTOIRE_RESET_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -163,7 +168,7 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2..=5) {
+        if matches!(schema_version(&connection)?, 2..=6) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -188,6 +193,12 @@ impl SqliteStore {
             if schema_version(&tx)? == 5 {
                 tx.execute_batch(GAME_REVIEW_BACKFILL)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 6)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 6 {
+                tx.execute_batch(REPERTOIRE_RESET_SCHEMA)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -208,6 +219,36 @@ impl SqliteStore {
 mod tactic_page;
 
 impl Store for SqliteStore {
+    fn reset_repertoire(
+        &mut self,
+        dataset: &DatasetId,
+        repertoire: &str,
+        command_id: &str,
+        at_ms: u64,
+        fresh: &LearningState,
+    ) -> Result<RepertoireReset, StoreError> {
+        repertoire_resets::apply(
+            &mut self.connection,
+            dataset,
+            repertoire,
+            command_id,
+            at_ms,
+            fresh,
+        )
+    }
+
+    fn repertoire_reset_at(
+        &self,
+        dataset: &DatasetId,
+        repertoire: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        self.connection.query_row(
+            "SELECT max(reset_at_ms) FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2",
+            params![dataset.0, repertoire],
+            |row| row.get(0),
+        ).map_err(database_error)
+    }
+
     fn commit_games(
         &mut self,
         commit: Commit,

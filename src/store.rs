@@ -2,6 +2,7 @@
 
 use crate::{Commit, Receipt, Snapshot, StoreError, StoredAttempt, store_error::invalid};
 use tempo_chess::ContentItem;
+use tempo_learning::LearningState;
 use tempo_types::{
     AttemptId, ContentVersion, DatasetId, Revision, StudyDay, SubmissionId, TargetId,
 };
@@ -38,6 +39,15 @@ pub struct RepertoireDocument {
     pub revision: Revision,
     pub item: Option<ContentItem>,
     pub pgn: Option<String>,
+}
+
+/// The same command may be delivered again without changing newer learning.
+pub enum RepertoireReset {
+    Applied(Vec<TargetId>),
+    Replayed,
+    StaleDataset,
+    UnknownRepertoire,
+    CommandConflict,
 }
 
 /// The consistent-read and atomic-write persistence boundary.
@@ -104,6 +114,29 @@ pub trait Store {
 
     fn repertoire_document(&self, _id: &str) -> Result<RepertoireDocument, StoreError> {
         Err(invalid("this Store does not support repertoire documents"))
+    }
+
+    /// Clear one repertoire's Study records and publish its reset receipt atomically.
+    fn reset_repertoire(
+        &mut self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+        _command_id: &str,
+        _at_ms: u64,
+        _fresh: &LearningState,
+    ) -> Result<RepertoireReset, StoreError> {
+        Err(invalid(
+            "this Store does not support repertoire progress resets",
+        ))
+    }
+
+    /// Latest reset whose evidence boundary applies to this repertoire.
+    fn repertoire_reset_at(
+        &self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        Ok(None)
     }
 
     fn content_receipt(&self, _request: &str) -> Result<Option<String>, StoreError> {

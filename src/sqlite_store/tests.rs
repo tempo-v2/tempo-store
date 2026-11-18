@@ -107,6 +107,52 @@ fn simultaneous_writers_from_one_revision_have_one_winner() {
 }
 
 #[test]
+fn repertoire_reset_rolls_back_scoped_deletions_when_its_receipt_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reset.sqlite");
+    let mut store = create(&path, demo_catalog());
+    let issued = issue(&mut store);
+    store
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER reject_reset_receipt BEFORE INSERT ON repertoire_resets
+         BEGIN SELECT RAISE(ABORT, 'injected reset failure'); END;",
+        )
+        .unwrap();
+    let fresh = LearningState::default();
+    assert!(
+        store
+            .reset_repertoire(&issued.dataset, "r1", "reset-one", 100, &fresh)
+            .is_err()
+    );
+    assert_eq!(store.snapshot().unwrap(), issued);
+    assert_eq!(
+        store.repertoire_reset_at(&issued.dataset, "r1").unwrap(),
+        None
+    );
+
+    store
+        .connection
+        .execute_batch("DROP TRIGGER reject_reset_receipt")
+        .unwrap();
+    assert!(matches!(
+        store
+            .reset_repertoire(&issued.dataset, "r1", "reset-one", 100, &fresh)
+            .unwrap(),
+        RepertoireReset::Applied(_)
+    ));
+    let reset = store.snapshot().unwrap();
+    assert!(reset.active_attempt.is_none());
+    assert!(reset.attempts.is_empty());
+    assert_eq!(reset.learning, issued.learning);
+    assert!(matches!(
+        commit(&mut store, &issued, successful_answer_writes(&issued)),
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(store.snapshot().unwrap(), reset);
+}
+
+#[test]
 fn receipt_trigger_aborts_late_writes_and_the_same_batch_can_retry_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");
