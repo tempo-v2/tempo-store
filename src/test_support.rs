@@ -40,7 +40,7 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
         mode: crate::ActivityMode::Test,
         route: None,
         first_introduction: false,
-        repertoire_name: None,
+        exercise_name: None,
         lesson: None,
         acceptance: None,
     }
