@@ -3,8 +3,8 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentReceipt, ContentSource, Receipt, ReceiptResult, Snapshot, Store, StoreError,
-    StoredAttempt, StudyScope, Write,
+    Commit, ContentReceipt, ContentSource, Receipt, ReceiptResult, RepertoireDocument, Snapshot,
+    Store, StoreError, StoredAttempt, StudyScope, Write,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -22,9 +22,10 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const SCHEMA: &str = include_str!("sqlite_store/schema.sql");
 const DAILY_ALLOWANCE_SCHEMA: &str = include_str!("sqlite_store/daily_allowances.sql");
+const REPERTOIRE_DOCUMENT_SCHEMA: &str = include_str!("sqlite_store/repertoire_documents.sql");
 
 /// An atomic, file-backed implementation of [`Store`].
 ///
@@ -93,6 +94,9 @@ impl SqliteStore {
             .execute_batch(DAILY_ALLOWANCE_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(REPERTOIRE_DOCUMENT_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -150,12 +154,18 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if schema_version(&connection)? == 2 {
+        if matches!(schema_version(&connection)?, 2 | 3) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
             if schema_version(&tx)? == 2 {
                 tx.execute_batch(DAILY_ALLOWANCE_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 3)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 3 {
+                tx.execute_batch(REPERTOIRE_DOCUMENT_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
@@ -341,6 +351,30 @@ impl Store for SqliteStore {
         self.commit_content(commit, None, None)
     }
 
+    fn repertoire_document(&self, id: &str) -> Result<RepertoireDocument, StoreError> {
+        let (dataset, revision, item, pgn): (_, u64, Option<String>, _) = self.connection
+            .query_row(
+                "SELECT state.dataset_id, state.content_revision,
+                        (SELECT item FROM current_content
+                         WHERE dataset_id=state.dataset_id AND repertoire=?1 ORDER BY target_id LIMIT 1),
+                        source.pgn
+                 FROM store_state AS state
+                 LEFT JOIN repertoire_documents AS document
+                    ON document.dataset_id=state.dataset_id AND document.repertoire_id=?1
+                 LEFT JOIN content_sources AS source ON source.id=document.source_id
+                 WHERE state.singleton=1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(database_error)?;
+        Ok(RepertoireDocument {
+            dataset: DatasetId(dataset),
+            revision: Revision(revision),
+            item: item.as_deref().map(row_values::decode).transpose()?,
+            pgn,
+        })
+    }
+
     fn content_receipt(&self, request: &str) -> Result<Option<String>, StoreError> {
         self.connection
             .query_row(
@@ -362,27 +396,89 @@ impl Store for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        let revision = if commit.writes.is_empty() && receipt.is_some() {
+        let dataset = commit.expected_dataset.clone();
+        let no_writes_with_receipt = commit.writes.is_empty() && receipt.is_some();
+        let (mut revision, catalog_changed) = if no_writes_with_receipt {
             let current = load_study::load_study(&transaction, StudyScope::default())?;
             if commit.expected_dataset != current.dataset
                 || commit.expected_revision != current.revision
             {
                 return Err(conflict("snapshot changed; reload before retrying"));
             }
-            current.revision
+            (current.revision, false)
         } else {
             let previous = load_snapshot(&transaction)?;
             let next = stage_commit(&previous, commit)?;
             save_snapshot(&transaction, Some(&previous), &next)?;
-            next.revision
+            (
+                next.revision,
+                previous.dataset != next.dataset || previous.catalog != next.catalog,
+            )
         };
         if let Some(source) = source {
-            transaction
+            let (id, pgn, repertoire) = match source {
+                ContentSource::Archive { id, pgn } => (id, pgn, None),
+                ContentSource::RepertoireDocument {
+                    id,
+                    pgn,
+                    repertoire_id,
+                } => (id, pgn, Some(repertoire_id)),
+            };
+            let inserted = transaction
                 .execute(
                     "INSERT INTO content_sources VALUES (?1, ?2) ON CONFLICT DO NOTHING",
-                    params![source.id, source.pgn],
+                    params![id, pgn],
                 )
                 .map_err(database_error)?;
+            if inserted == 0 {
+                let matches: bool = transaction
+                    .query_row(
+                        "SELECT pgn=?2 FROM content_sources WHERE id=?1",
+                        params![id, pgn],
+                        |row| row.get(0),
+                    )
+                    .map_err(database_error)?;
+                if !matches {
+                    return Err(invalid(
+                        "archived content source disagrees with the supplied document",
+                    ));
+                }
+            }
+            if let Some(repertoire) = repertoire {
+                let exists: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM current_content
+                     WHERE dataset_id=?1 AND repertoire=?2)",
+                        params![dataset.0, repertoire],
+                        |row| row.get(0),
+                    )
+                    .map_err(database_error)?;
+                if !exists {
+                    return Err(invalid(
+                        "current document requires a repertoire in the active dataset",
+                    ));
+                }
+                let changed = transaction.execute(
+                    "INSERT INTO repertoire_documents VALUES (?1, ?2, ?3)
+                     ON CONFLICT(dataset_id, repertoire_id) DO UPDATE SET source_id=excluded.source_id
+                     WHERE source_id<>excluded.source_id",
+                    params![dataset.0, repertoire, id],
+                ).map_err(database_error)? != 0;
+                if changed && !catalog_changed {
+                    if no_writes_with_receipt {
+                        revision = Revision(
+                            revision
+                                .0
+                                .checked_add(1)
+                                .ok_or_else(|| invalid("store revision exhausted"))?,
+                        );
+                    }
+                    transaction.execute(
+                        "UPDATE store_state SET content_revision=content_revision+1, revision=?1",
+                        [revision.0.to_be_bytes().as_slice()],
+                    ).map_err(database_error)?;
+                }
+            }
         }
         if let Some(receipt) = receipt {
             transaction

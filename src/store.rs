@@ -20,9 +20,24 @@ pub struct ContentReceipt<'a> {
     pub reply: &'a str,
 }
 
-pub struct ContentSource<'a> {
-    pub id: &'a str,
-    pub pgn: &'a str,
+pub enum ContentSource<'a> {
+    /// Historical provenance for an accepted catalog operation.
+    Archive { id: &'a str, pgn: &'a str },
+    /// The accepted full authored document of one addressed repertoire.
+    RepertoireDocument {
+        id: &'a str,
+        pgn: &'a str,
+        repertoire_id: &'a str,
+    },
+}
+
+/// A bounded, consistent read of the active dataset and selected repertoire.
+/// An existing repertoire can lack an authoritative PGN association.
+pub struct RepertoireDocument {
+    pub dataset: DatasetId,
+    pub revision: Revision,
+    pub item: Option<ContentItem>,
+    pub pgn: Option<String>,
 }
 
 /// The consistent-read and atomic-write persistence boundary.
@@ -87,17 +102,24 @@ pub trait Store {
         Ok((state, revision))
     }
 
+    fn repertoire_document(&self, _id: &str) -> Result<RepertoireDocument, StoreError> {
+        Err(invalid("this Store does not support repertoire documents"))
+    }
+
     fn content_receipt(&self, _request: &str) -> Result<Option<String>, StoreError> {
         Ok(None)
     }
 
-    /// Pin sources and the application's reply in the content transaction.
+    /// Pin sources, any current repertoire association and the reply atomically.
     fn commit_content(
         &mut self,
         commit: Commit,
-        _source: Option<ContentSource<'_>>,
+        source: Option<ContentSource<'_>>,
         _receipt: Option<ContentReceipt<'_>>,
     ) -> Result<Revision, StoreError> {
+        if matches!(source, Some(ContentSource::RepertoireDocument { .. })) {
+            return Err(invalid("this Store does not support repertoire documents"));
+        }
         self.commit(commit)
     }
 
