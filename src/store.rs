@@ -53,6 +53,16 @@ pub trait Store {
         self.commit(commit)
     }
 
+    /// Read a page of current tactics and basic learning facts in target order.
+    fn tactic_page(
+        &self,
+        _query: crate::TacticPageQuery<'_>,
+    ) -> Result<crate::TacticPage, StoreError> {
+        Err(invalid(
+            "this Store does not support bounded tactic browsing",
+        ))
+    }
+
     fn tactics_extra(&self, _dataset: &DatasetId, _day: StudyDay) -> Result<usize, StoreError> {
         Ok(0)
     }
