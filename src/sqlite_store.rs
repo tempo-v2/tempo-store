@@ -106,6 +106,18 @@ impl SqliteStore {
         Ok(Self { connection })
     }
 
+    /// List saved content sources for local provenance reconciliation.
+    pub fn content_source_ids(&self) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let mut query = self
+            .connection
+            .prepare("SELECT id FROM content_sources")
+            .map_err(database_error)?;
+        let rows = query
+            .query_map([], |row| row.get(0))
+            .map_err(database_error)?;
+        rows.collect::<Result<_, _>>().map_err(database_error)
+    }
+
     /// Read the local application's persisted settings representation.
     pub fn local_profile(&self) -> Result<Option<String>, StoreError> {
         self.connection
@@ -162,7 +174,16 @@ impl SqliteStore {
     }
 }
 
+mod tactic_page;
+
 impl Store for SqliteStore {
+    fn tactic_page(
+        &self,
+        query: crate::TacticPageQuery<'_>,
+    ) -> Result<crate::TacticPage, StoreError> {
+        self.read_tactic_page(query)
+    }
+
     fn snapshot(&self) -> Result<Snapshot, StoreError> {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
