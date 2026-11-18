@@ -24,7 +24,8 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
+const GAME_CORRECTIONS_SCHEMA: &str = include_str!("sqlite_store/game_corrections.sql");
 const REPERTOIRE_RESET_SCHEMA: &str = include_str!("sqlite_store/repertoire_resets.sql");
 const GAME_REVIEW_BACKFILL: &str = include_str!("sqlite_store/game_review_backfill.sql");
 const GAME_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/game_evidence.sql");
@@ -111,6 +112,9 @@ impl SqliteStore {
             .execute_batch(REPERTOIRE_RESET_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(GAME_CORRECTIONS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -168,7 +172,7 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2..=6) {
+        if matches!(schema_version(&connection)?, 2..=7) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -198,6 +202,12 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 6 {
                 tx.execute_batch(REPERTOIRE_RESET_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 7)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 7 {
+                tx.execute_batch(GAME_CORRECTIONS_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
@@ -283,6 +293,143 @@ impl Store for SqliteStore {
         signature: &str,
     ) -> Result<Option<crate::GameRecord>, StoreError> {
         self.read_verified_game(dataset, url, signature)
+    }
+
+    fn legacy_game_misses(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+    ) -> Result<Vec<crate::LegacyGameMiss>, StoreError> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(database_error)?;
+        row_values::read_selected(&tx,
+            "SELECT DISTINCT game.source,game.id,json_extract(comparison.summary,'$.learner'),observation.ply,game.start_ms,game.end_ms
+             FROM game_observations AS observation
+             JOIN game_comparisons AS comparison ON comparison.dataset_id=observation.dataset_id AND comparison.id=observation.comparison_id
+             JOIN games AS game ON game.dataset_id=comparison.dataset_id AND game.source=comparison.source AND game.id=comparison.game_id
+             WHERE observation.dataset_id=?1 AND observation.target_id=?2 AND observation.version=?3
+               AND observation.played<>observation.prescribed AND json_extract(comparison.summary,'$.correction_effect') IS NULL
+             ORDER BY game.source,game.id,observation.ply",
+            params![dataset.0, target.0, version.0.to_be_bytes().as_slice()], |row| {
+                Ok(crate::LegacyGameMiss {
+                    source: row.get(0).map_err(database_error)?, game_id: row.get(1).map_err(database_error)?,
+                    learner: row.get(2).map_err(database_error)?, ply: row.get(3).map_err(database_error)?,
+                    start_ms: row.get(4).map_err(database_error)?, end_ms: row.get(5).map_err(database_error)?,
+                })
+            })
+    }
+
+    fn game_comparison(
+        &self,
+        dataset: &DatasetId,
+        id: &str,
+    ) -> Result<Option<crate::GameSummary>, StoreError> {
+        let saved: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT summary FROM game_comparisons WHERE dataset_id=?1 AND id=?2",
+                params![dataset.0, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        saved.as_deref().map(row_values::decode).transpose()
+    }
+
+    fn game_choice_resolved(
+        &self,
+        dataset: &DatasetId,
+        source: &str,
+        game_id: &str,
+        position: &str,
+    ) -> Result<bool, StoreError> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM game_choice_resolutions WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND position=?4 UNION SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position=?4)",
+            params![dataset.0, source, game_id, position], |row| row.get(0)
+        ).map_err(database_error)
+    }
+
+    fn game_failed(
+        &self,
+        dataset: &DatasetId,
+        key: &crate::GameFailureKey,
+    ) -> Result<bool, StoreError> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND target_id=?4)",
+            params![dataset.0, key.source, key.game_id, key.target.0], |row| row.get(0)
+        ).map_err(database_error)
+    }
+
+    fn game_failures(&self, dataset: &DatasetId) -> Result<Vec<crate::GameFailureKey>, StoreError> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(database_error)?;
+        row_values::read_selected(
+            &tx,
+            "SELECT source,game_id,target_id,version,chosen_position FROM game_failures WHERE dataset_id=?1 ORDER BY source,game_id,target_id",
+            [&dataset.0],
+            |row| {
+                Ok(crate::GameFailureKey {
+                    source: row.get(0).map_err(database_error)?,
+                    game_id: row.get(1).map_err(database_error)?,
+                    target: TargetId(row.get(2).map_err(database_error)?),
+                    version: ContentVersion(row_values::decode_counter(
+                        row.get(3).map_err(database_error)?,
+                    )?),
+                    chosen_position: row.get(4).map_err(database_error)?,
+                })
+            },
+        )
+    }
+
+    fn restore_with_game_failures(
+        &mut self,
+        commit: Commit,
+        keys: &[crate::GameFailureKey],
+    ) -> Result<Revision, StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let previous = load_snapshot(&tx)?;
+        let next = stage_commit(&previous, commit)?;
+        save_snapshot(&tx, Some(&previous), &next)?;
+        for key in keys {
+            game_evidence::save_failure(&tx, &next.dataset, key, None)?;
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(next.revision)
+    }
+
+    fn stored_game(
+        &self,
+        dataset: &DatasetId,
+        source: &str,
+        id: &str,
+    ) -> Result<Option<crate::GameRecord>, StoreError> {
+        self.connection.query_row(
+            "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms FROM games
+             WHERE dataset_id=?1 AND source=?2 AND id=?3",
+            params![dataset.0, source, id], game_evidence::game_row
+        ).optional().map_err(database_error)
+    }
+
+    fn games_in_window(
+        &self,
+        dataset: &DatasetId,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<crate::GameRecord>, StoreError> {
+        let mut query = self.connection.prepare(
+            "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms FROM games
+             WHERE dataset_id=?1 AND coalesce(start_ms,end_ms,played_date_ms,fetched_ms)>=?2 AND coalesce(start_ms,end_ms,played_date_ms,fetched_ms)<?3
+             ORDER BY coalesce(start_ms,end_ms,played_date_ms,fetched_ms),source,id LIMIT 501"
+        ).map_err(database_error)?;
+        query
+            .query_map(params![dataset.0, from, to], game_evidence::game_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
     }
 
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {

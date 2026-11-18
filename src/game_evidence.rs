@@ -13,6 +13,7 @@ pub struct GameRecord {
     pub start_ms: Option<u64>,
     pub end_ms: Option<u64>,
     pub fetched_ms: u64,
+    pub played_date_ms: Option<u64>,
     pub pgn: String,
     pub mainline_signature: String,
 }
@@ -47,7 +48,9 @@ impl PgnTiming {
 
 impl GameRecord {
     pub fn precise_pgn_timing(&self) -> Option<PgnTiming> {
-        let start_ms = self.start_ms.filter(|_| self.source == "pgn")?;
+        let start_ms = self
+            .start_ms
+            .filter(|_| self.source == "pgn" && !self.mainline_signature.is_empty())?;
         Some(PgnTiming {
             mainline_signature: Some(self.mainline_signature.clone()),
             start_ms,
@@ -62,6 +65,8 @@ pub struct ComparedGame {
     pub id: String,
     pub summary: GameSummary,
     pub observations: Vec<GameObservation>,
+    pub failures: Vec<crate::AssessmentRecord>,
+    pub resolved_choice: Option<(String, usize, String)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,6 +83,51 @@ pub struct GameSummary {
     pub first_deviation_ply: Option<usize>,
     pub coverage_gaps: usize,
     pub opponent_deviations: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_effect: Option<tempo_learning::GameReviewEffect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<GameChoice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disagreements: Vec<RepertoireDisagreement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameChoice {
+    pub ply: usize,
+    pub position: String,
+    pub candidates: Vec<GameChoiceTarget>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameChoiceTarget {
+    pub repertoire_id: String,
+    pub target_id: TargetId,
+    pub version: ContentVersion,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RepertoireDisagreement {
+    pub repertoire_id: String,
+    pub plies: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameFailureKey {
+    pub source: String,
+    pub game_id: String,
+    pub target: TargetId,
+    pub version: ContentVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_position: Option<String>,
+}
+
+pub struct LegacyGameMiss {
+    pub source: String,
+    pub game_id: String,
+    pub learner: String,
+    pub ply: usize,
+    pub start_ms: Option<u64>,
+    pub end_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,18 +146,9 @@ pub struct GameCommit {
 }
 
 #[derive(Debug)]
-pub struct GameDeviation {
-    pub target: TargetId,
-    pub version: ContentVersion,
-    pub start_ms: Option<u64>,
-    pub end_ms: Option<u64>,
-}
-
-#[derive(Debug)]
 pub struct GameHistoryEntry {
     pub comparison_id: String,
     pub summary: GameSummary,
-    pub deviations: Vec<GameDeviation>,
 }
 
 #[derive(Default, Debug)]
