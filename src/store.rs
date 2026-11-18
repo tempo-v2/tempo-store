@@ -151,8 +151,28 @@ pub trait Store {
         _commit: Commit,
         _games: &[crate::ComparedGame],
         _successful_refresh_ms: Option<u64>,
-    ) -> Result<crate::GameCommit, StoreError> {
+        _receipt: crate::GameReceipt<'_>,
+    ) -> Result<crate::AcceptedGames, StoreError> {
         Err(invalid("this Store does not support game evidence"))
+    }
+
+    fn game_receipt(
+        &self,
+        _dataset: &DatasetId,
+        _id: &str,
+        _fingerprint: &str,
+    ) -> Result<Option<crate::AcceptedGames>, StoreError> {
+        Ok(None)
+    }
+
+    /// Resolve a previously verified provider game by canonical URL and played facts.
+    fn verified_game(
+        &self,
+        _dataset: &DatasetId,
+        _url: &str,
+        _signature: &str,
+    ) -> Result<Option<crate::GameRecord>, StoreError> {
+        Ok(None)
     }
 
     /// The recent answer-safe comparison records for the active dataset.
