@@ -7,7 +7,7 @@ use crate::{
 };
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
-use tempo_types::{ContentVersion, DatasetId, TargetId};
+use tempo_types::DatasetId;
 
 pub(super) fn game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::GameRecord> {
     Ok(crate::GameRecord {
