@@ -54,6 +54,119 @@ pub(super) fn save_failure(
     Ok(())
 }
 
+pub(super) fn correction_game(
+    tx: &Transaction<'_>,
+    lookup: crate::CorrectionGameLookup<'_>,
+) -> Result<Option<crate::CorrectionGame>, StoreError> {
+    let dataset = &lookup.dataset.0;
+    let target = &lookup.target.0;
+    let version = lookup.version.0.to_be_bytes();
+    // Start with indexed target/version observations, then probe each raw
+    // game's accepted failure independently of the comparison revision.
+    let failures: Vec<(String, String, Option<String>, crate::AssessmentRecord)> =
+        row_values::read_selected(
+            tx,
+            "SELECT f.source, f.game_id, f.chosen_position, f.assessment
+             FROM (
+                 SELECT DISTINCT comparison.source, comparison.game_id
+                 FROM game_observations AS observation
+                 JOIN game_comparisons AS comparison
+                   ON comparison.dataset_id=observation.dataset_id AND comparison.id=observation.comparison_id
+                 WHERE observation.dataset_id=?1 AND observation.target_id=?2 AND observation.version=?3
+             ) AS observed
+             JOIN game_failures AS f
+               ON f.dataset_id=?1 AND f.source=observed.source AND f.game_id=observed.game_id AND f.target_id=?2
+             WHERE f.version=?3 AND f.assessment IS NOT NULL",
+            params![dataset, target, version.as_slice()],
+            |row| {
+                Ok((
+                    row.get(0).map_err(database_error)?,
+                    row.get(1).map_err(database_error)?,
+                    row.get(2).map_err(database_error)?,
+                    row_values::text_value(row, 3)?,
+                ))
+            },
+        )?;
+    let mut matching = failures.iter().filter(|(source, game_id, _, assessment)| {
+        let accepted_at = assessment.input.accepted_at.unix_ms;
+        &assessment.dataset == lookup.dataset
+            && &assessment.target == lookup.target
+            && assessment.content_version == lookup.version
+            && assessment.input.grade == Grade::Again
+            && assessment.transition.effect == LearningEffect::MissRecorded
+            && assessment.transition.state.miss_revision == lookup.miss_revision
+            && assessment.transition.state.correction.as_ref().is_some_and(|correction|
+                correction.answer_version == lookup.version)
+            && accepted_at <= lookup.issued_at_ms
+            // Reset can reuse a miss revision. A tie cannot prove ordering.
+            && lookup.reset_at_ms.is_none_or(|reset_at| accepted_at > reset_at)
+            && matches!(&assessment.input.source, AssessmentSource::Game { source: s, game_id: g, .. }
+                if s == source && g == game_id)
+    });
+    let Some((source, game_id, chosen_position, _)) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        return Ok(None);
+    }
+    // A native choice closes one exact ply. Older automatic corrections
+    // lack that pointer, so all surviving observations must agree.
+    let chosen_ply = if let Some(position) = chosen_position {
+        let saved: Option<usize> = tx
+            .query_row(
+                "SELECT ply FROM game_choice_resolutions
+             WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND position=?4
+               AND (selected_target_id IS NULL OR
+                    (selected_target_id=?5 AND selected_answer_version=?6))",
+                params![
+                    dataset,
+                    source,
+                    game_id,
+                    position,
+                    target,
+                    version.as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some(ply) = saved else {
+            return Ok(None);
+        };
+        Some(ply)
+    } else {
+        None
+    };
+    let observations: Vec<(usize, String)> = row_values::read_selected(
+        tx,
+        "SELECT DISTINCT observation.ply, observation.played
+         FROM game_observations AS observation
+         JOIN game_comparisons AS comparison
+           ON comparison.dataset_id=observation.dataset_id AND comparison.id=observation.comparison_id
+         WHERE observation.dataset_id=?1 AND observation.target_id=?2 AND observation.version=?3
+           AND comparison.source=?4 AND comparison.game_id=?5
+           AND observation.prescribed=?6 AND observation.played<>observation.prescribed
+           AND (?7 IS NULL OR observation.ply=?7)
+         LIMIT 2",
+        params![dataset, target, version.as_slice(), source, game_id, lookup.prescribed, chosen_ply],
+        |row| Ok((row.get(0).map_err(database_error)?, row.get(1).map_err(database_error)?)),
+    )?;
+    let [(ply, played)] = observations.as_slice() else {
+        return Ok(None);
+    };
+    let game = tx.query_row(
+        "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms
+         FROM games WHERE dataset_id=?1 AND source=?2 AND id=?3",
+        params![dataset, source, game_id],
+        game_row,
+    ).optional().map_err(database_error)?;
+    Ok(game.map(|game| crate::CorrectionGame {
+        game,
+        ply: *ply,
+        played: played.clone(),
+    }))
+}
+
 pub(super) fn read_game_failures(
     tx: &Transaction<'_>,
     dataset: &DatasetId,

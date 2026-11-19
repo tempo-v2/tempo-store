@@ -502,6 +502,15 @@ impl Store for SqliteStore {
         Ok(next.revision)
     }
 
+    fn correction_game(
+        &self,
+        lookup: crate::CorrectionGameLookup<'_>,
+    ) -> Result<Option<crate::CorrectionGame>, StoreError> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(database_error)?;
+        game_evidence::correction_game(&tx, lookup)
+    }
+
     fn stored_game(
         &self,
         dataset: &DatasetId,

@@ -304,6 +304,15 @@ pub trait Store {
         Ok((snapshot, evidence))
     }
 
+    /// Recover the source of the issued miss when the dataset retains enough
+    /// acceptance and observation evidence. This is a presentation read.
+    fn correction_game(
+        &self,
+        _lookup: crate::CorrectionGameLookup<'_>,
+    ) -> Result<Option<crate::CorrectionGame>, StoreError> {
+        Ok(None)
+    }
+
     fn stored_game(
         &self,
         _dataset: &DatasetId,
