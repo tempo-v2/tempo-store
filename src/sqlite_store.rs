@@ -14,6 +14,7 @@ use tempo_chess::{Catalog, ContentItem};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
+mod game_choices;
 mod game_evidence;
 mod game_relevance;
 mod load_snapshot;
@@ -25,7 +26,10 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 10;
+pub use game_choices::ChoiceMigrationReport;
+
+const SCHEMA_VERSION: i64 = 11;
+const CORRECTIVE_RELEASE_SCHEMA: &str = include_str!("sqlite_store/corrective_release.sql");
 const GAME_RELEVANCE_SCHEMA: &str = include_str!("sqlite_store/game_relevance.sql");
 const PORTABLE_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/portable_evidence.sql");
 const GAME_CORRECTIONS_SCHEMA: &str = include_str!("sqlite_store/game_corrections.sql");
@@ -59,6 +63,7 @@ const REPERTOIRE_DOCUMENT_SCHEMA: &str = include_str!("sqlite_store/repertoire_d
 /// ```
 pub struct SqliteStore {
     connection: Connection,
+    choice_migration: Option<ChoiceMigrationReport>,
 }
 
 impl SqliteStore {
@@ -124,6 +129,9 @@ impl SqliteStore {
             .execute_batch(GAME_RELEVANCE_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(CORRECTIVE_RELEASE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -134,7 +142,10 @@ impl SqliteStore {
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            choice_migration: None,
+        })
     }
 
     /// List saved content sources for local provenance reconciliation.
@@ -181,7 +192,8 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2..=9) {
+        let mut choice_migration = None;
+        if matches!(schema_version(&connection)?, 2..=10) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -230,6 +242,13 @@ impl SqliteStore {
             if schema_version(&tx)? == 9 {
                 tx.execute_batch(GAME_RELEVANCE_SCHEMA)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 10)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 10 {
+                tx.execute_batch(CORRECTIVE_RELEASE_SCHEMA)
+                    .map_err(database_error)?;
+                choice_migration = Some(game_choices::migrate(&tx)?);
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -241,9 +260,17 @@ impl SqliteStore {
                 "unsupported SQLite store version {version}"
             )));
         }
-        let store = Self { connection };
+        let store = Self {
+            connection,
+            choice_migration,
+        };
         store.study_state(StudyScope::default())?;
         Ok(store)
+    }
+
+    /// Counts for an upgrade performed by this opening of the database.
+    pub fn choice_migration_report(&self) -> Option<&ChoiceMigrationReport> {
+        self.choice_migration.as_ref()
     }
 }
 
@@ -376,30 +403,35 @@ impl Store for SqliteStore {
         saved.as_deref().map(row_values::decode).transpose()
     }
 
-    fn game_choice_resolved(
+    fn game_choices(
         &self,
         dataset: &DatasetId,
         source: &str,
         game_id: &str,
-        position: &str,
-    ) -> Result<bool, StoreError> {
-        self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM game_choice_boundaries WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND position=?4 UNION SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position=?4)",
-            params![dataset.0, source, game_id, position], |row| row.get(0)
-        ).map_err(database_error)
+    ) -> Result<crate::GameChoices, StoreError> {
+        game_choices::read(&self.connection, dataset, source, game_id)
     }
 
-    fn game_target_chosen(
+    fn choice_encounter_keys(
         &self,
         dataset: &DatasetId,
-        key: &crate::GameFailureKey,
-    ) -> Result<bool, StoreError> {
-        self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3
-             AND target_id=?4 AND version=?5 AND chosen_position=?6)",
-            params![dataset.0, key.source, key.game_id, key.target.0, key.version.0.to_be_bytes().as_slice(),
-                key.chosen_position], |row| row.get(0),
-        ).map_err(database_error)
+        after: Option<&crate::EncounterKey>,
+    ) -> Result<Vec<crate::EncounterKey>, StoreError> {
+        game_relevance::choice_encounter_keys(&self.connection, dataset, after)
+    }
+
+    fn repair_choice_encounters(
+        &mut self,
+        dataset: &DatasetId,
+        content_revision: Revision,
+        repairs: &[crate::EncounterRepair],
+    ) -> Result<usize, StoreError> {
+        game_relevance::repair_choice_encounters(
+            &mut self.connection,
+            dataset,
+            content_revision,
+            repairs,
+        )
     }
 
     fn game_failed(
@@ -432,6 +464,7 @@ impl Store for SqliteStore {
         &mut self,
         commit: Commit,
         evidence: &crate::PortableGameEvidence,
+        choice_format: crate::PortableChoiceFormat,
     ) -> Result<Revision, StoreError> {
         if !matches!(commit.writes.as_slice(), [Write::Restore { .. }]) {
             return Err(invalid("portable evidence requires a dataset restore"));
@@ -443,7 +476,7 @@ impl Store for SqliteStore {
         let previous = load_snapshot(&tx)?;
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&tx, Some(&previous), &next)?;
-        game_evidence::save_portable_evidence(&tx, &next, evidence)?;
+        game_evidence::save_portable_evidence(&tx, &next, evidence, choice_format)?;
         tx.commit().map_err(database_error)?;
         Ok(next.revision)
     }

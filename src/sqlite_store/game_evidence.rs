@@ -1,13 +1,16 @@
-use super::{SqliteStore, database_error, load_study, row_values, save_snapshot};
+use super::{
+    SqliteStore, database_error, game_choices, game_relevance, load_study, row_values,
+    save_snapshot,
+};
 use crate::store_error::{conflict, invalid};
 use crate::transaction::stage_commit;
-use crate::{AcceptedGames, GameReceipt, PgnTiming};
+use crate::{AcceptedGames, GameReceipt, PgnTiming, PortableChoiceFormat};
 use crate::{
     Commit, ComparedGame, GameCommit, GameHistory, GameHistoryEntry, StoreError, StudyScope, Write,
 };
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tempo_chess::ContentKind;
 use tempo_learning::{AssessmentSource, LearningEffect};
 use tempo_types::DatasetId;
@@ -96,7 +99,7 @@ pub(super) fn read_portable_evidence(
     )?;
     let resolved_game_choices = row_values::read_selected(
         tx,
-        "SELECT DISTINCT source,game_id,position FROM game_choice_boundaries
+        "SELECT source,game_id,position,selected_target_id,selected_answer_version FROM game_choice_boundaries
          WHERE dataset_id=?1 ORDER BY source,game_id,position",
         [&dataset.0],
         |row| {
@@ -104,6 +107,7 @@ pub(super) fn read_portable_evidence(
                 source: row.get(0).map_err(database_error)?,
                 game_id: row.get(1).map_err(database_error)?,
                 position: row.get(2).map_err(database_error)?,
+                attribution: game_choices::attribution(row, 3)?,
             })
         },
     )?;
@@ -118,6 +122,7 @@ pub(super) fn save_portable_evidence(
     tx: &Transaction<'_>,
     next: &crate::Snapshot,
     evidence: &crate::PortableGameEvidence,
+    choice_format: PortableChoiceFormat,
 ) -> Result<(), StoreError> {
     let repertoires: std::collections::BTreeSet<_> = next
         .catalog
@@ -138,6 +143,7 @@ pub(super) fn save_portable_evidence(
         )
         .map_err(database_error)?;
     }
+    let mut failure_choices = BTreeMap::<_, BTreeSet<_>>::new();
     for key in &evidence.game_failures {
         if key.source.is_empty()
             || key.game_id.is_empty()
@@ -151,21 +157,72 @@ pub(super) fn save_portable_evidence(
             return Err(invalid("invalid portable game failure provenance"));
         }
         save_failure(tx, &next.dataset, key, None)?;
+        if let Some(position) = &key.chosen_position {
+            let proof = failure_choices
+                .entry((&key.source, &key.game_id, position))
+                .or_default();
+            proof.insert(
+                game_choices::attribution_matches(
+                    &next.catalog.items[&key.target],
+                    position,
+                    key.version,
+                )
+                .then(|| game_choices::failure_attribution(key)),
+            );
+        }
     }
+    let mut choices = BTreeMap::new();
     for choice in &evidence.resolved_game_choices {
-        if choice.source.is_empty() || choice.game_id.is_empty() || choice.position.is_empty() {
+        if choice.source.is_empty()
+            || choice.game_id.is_empty()
+            || choice.position.is_empty()
+            || choice.attribution.as_ref().is_some_and(|selected| {
+                matches!(choice_format, PortableChoiceFormat::Legacy)
+                    || !next
+                        .catalog
+                        .items
+                        .get(&selected.target)
+                        .is_some_and(|item| {
+                            game_choices::attribution_matches(
+                                item,
+                                &choice.position,
+                                selected.answer_version,
+                            )
+                        })
+            })
+            || choices
+                .insert(
+                    (&choice.source, &choice.game_id, &choice.position),
+                    choice.attribution.clone(),
+                )
+                .is_some()
+        {
             return Err(invalid("invalid portable game choice resolution"));
         }
-        tx.execute(
-            "INSERT INTO restored_game_choices VALUES (?1,?2,?3,?4)",
-            params![
-                next.dataset.0,
-                choice.source,
-                choice.game_id,
-                choice.position
-            ],
-        )
-        .map_err(database_error)?;
+    }
+    for (key, mut proof) in failure_choices {
+        let selected = choices.entry(key).or_default();
+        if matches!(choice_format, PortableChoiceFormat::Legacy) && proof.len() == 1 {
+            *selected = proof.pop_first().flatten();
+        } else if let Some(selected) = selected
+            && (proof.len() != 1 || proof.first().and_then(Option::as_ref) != Some(selected))
+        {
+            return Err(invalid(
+                "portable game choice conflicts with failure provenance",
+            ));
+        }
+    }
+    for ((source, game_id, position), attribution) in choices {
+        game_choices::insert_restored(
+            tx,
+            &next.dataset.0,
+            &crate::ResolvedGameChoice {
+                source: source.clone(),
+                game_id: game_id.clone(),
+                position: position.clone(),
+                attribution,
+            },
+        )?;
     }
     Ok(())
 }
@@ -182,7 +239,7 @@ fn failure_key(
         chosen_position: entry
             .resolved_choice
             .as_ref()
-            .map(|(_, _, position)| position.clone()),
+            .map(|choice| choice.position.clone()),
     }
 }
 
@@ -258,7 +315,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         let scope = StudyScope {
             catalog: !commit.writes.is_empty()
-                || games.iter().any(|entry| !entry.failures.is_empty()),
+                || games
+                    .iter()
+                    .any(|entry| !entry.failures.is_empty() || entry.resolved_choice.is_some()),
             ..StudyScope::default()
         };
         let previous = load_study::load_study(&transaction, scope)?;
@@ -283,6 +342,17 @@ impl SqliteStore {
         let mut relevance_changed = false;
         for entry in games {
             let game = &entry.game;
+            if let Some(evidence) = &entry.relevance {
+                game_relevance::check_content_revision(&transaction, evidence.content_revision)?;
+                game_choices::ensure_current(
+                    &transaction,
+                    &previous.dataset,
+                    &game.source,
+                    &game.id,
+                    &evidence.prior_choices,
+                )?;
+            }
+            game_choices::validate_new(&transaction, &previous, entry)?;
             let raw = transaction
                 .execute(
                     "INSERT INTO games VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
@@ -346,11 +416,15 @@ impl SqliteStore {
             }
             result.new_games += raw;
             result.duplicates += 1 - raw;
-            if let Some((comparison, ply, position)) = &entry.resolved_choice {
+            if let Some(choice) = &entry.resolved_choice {
                 transaction
                     .execute(
-                        "INSERT INTO game_choice_resolutions VALUES (?1,?2,?3,?4,?5,?6)",
-                        params![dataset, comparison, ply, game.source, game.id, position],
+                        "INSERT INTO game_choice_resolutions
+                           (dataset_id,comparison_id,ply,source,game_id,position,selected_target_id,selected_answer_version)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                        params![dataset, choice.comparison_id, choice.ply, game.source, game.id,
+                            choice.position, choice.attribution.target.0,
+                            choice.attribution.answer_version.0.to_be_bytes().as_slice()],
                     )
                     .map_err(database_error)?;
             }
@@ -518,7 +592,7 @@ impl SqliteStore {
                 if !summary.choices.is_empty() {
                     let resolved: Vec<String> = row_values::read_selected(
                         &tx,
-                        "SELECT position FROM game_choice_boundaries WHERE dataset_id=?1 AND source=?2 AND game_id=?3 UNION SELECT chosen_position FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position IS NOT NULL",
+                        "SELECT position FROM game_choice_boundaries WHERE dataset_id=?1 AND source=?2 AND game_id=?3",
                         params![dataset, summary.source, summary.game_id],
                         |row| row.get(0).map_err(database_error),
                     )?;

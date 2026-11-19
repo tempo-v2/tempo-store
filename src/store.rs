@@ -243,22 +243,36 @@ pub trait Store {
         Ok(None)
     }
 
-    fn game_choice_resolved(
+    /// Read all closed positions and their accepted attribution, if it is known.
+    fn game_choices(
         &self,
         _dataset: &DatasetId,
         _source: &str,
         _game_id: &str,
-        _position: &str,
-    ) -> Result<bool, StoreError> {
-        Ok(false)
+    ) -> Result<crate::GameChoices, StoreError> {
+        Ok(Default::default())
     }
 
-    fn game_target_chosen(
+    /// Page through existing relevance inputs for games with accepted choices.
+    fn choice_encounter_keys(
         &self,
         _dataset: &DatasetId,
-        _key: &crate::GameFailureKey,
-    ) -> Result<bool, StoreError> {
-        Ok(false)
+        _after: Option<&crate::EncounterKey>,
+    ) -> Result<Vec<crate::EncounterKey>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Replace only encounter maps, under their content and exact choice fences.
+    /// Return how many maps actually changed. No game acceptance records are written.
+    fn repair_choice_encounters(
+        &mut self,
+        _dataset: &DatasetId,
+        _content_revision: Revision,
+        _repairs: &[crate::EncounterRepair],
+    ) -> Result<usize, StoreError> {
+        Err(invalid(
+            "this Store does not support encounter reconciliation",
+        ))
     }
 
     fn game_failed(
@@ -321,6 +335,7 @@ pub trait Store {
         &mut self,
         commit: Commit,
         evidence: &crate::PortableGameEvidence,
+        _choice_format: crate::PortableChoiceFormat,
     ) -> Result<Revision, StoreError> {
         if !evidence.is_empty() {
             return Err(invalid(

@@ -2,7 +2,7 @@
 
 use super::database_error;
 use crate::{StoreError, store_error::invalid};
-use rusqlite::{Params, Row, Transaction};
+use rusqlite::{Connection, Params, Row, Transaction};
 use serde::{Serialize, de::DeserializeOwned};
 
 pub(super) fn encode(value: &impl Serialize) -> Result<String, StoreError> {
@@ -33,12 +33,12 @@ pub(super) fn read_rows<T, C: FromIterator<T>>(
 }
 
 pub(super) fn read_selected<T, C: FromIterator<T>>(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     sql: &str,
     params: impl Params,
     read: impl FnMut(&Row<'_>) -> Result<T, StoreError>,
 ) -> Result<C, StoreError> {
-    let mut statement = transaction.prepare_cached(sql).map_err(database_error)?;
+    let mut statement = connection.prepare_cached(sql).map_err(database_error)?;
     let mut rows = statement.query(params).map_err(database_error)?;
     let mut read = read;
     std::iter::from_fn(|| {
