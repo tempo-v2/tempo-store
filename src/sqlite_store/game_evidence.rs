@@ -848,6 +848,182 @@ mod tests {
     }
 
     #[test]
+    fn no_grade_choice_is_atomic_and_fences_stale_encounter_maps() {
+        use crate::{
+            AcceptedGameChoice, ChoiceAttribution, ComparedRelevance, EncounterRepair, GameChoice,
+            GameChoiceTarget, GameObservation,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("choices.sqlite");
+        let dataset = DatasetId::from("choice-fence");
+        let catalog = tempo_chess::compile_repertoire(
+            "1. e4 e5 2. Nf3 *",
+            "book",
+            "Book",
+            tempo_chess::LearnerColor::White,
+            "fixture",
+        )
+        .unwrap();
+        let mut store = SqliteStore::create(
+            &path,
+            dataset.clone(),
+            catalog.clone(),
+            crate::test_support::policy().settings(),
+        )
+        .unwrap();
+        let before = store.snapshot().unwrap();
+        let content_revision = store.model_content_marker().unwrap().1;
+        let commit = || Commit {
+            expected_revision: before.revision,
+            expected_dataset: dataset.clone(),
+            writes: vec![],
+        };
+        let receipt = |id| GameReceipt {
+            id,
+            fingerprint: id,
+            report: "{}",
+        };
+        let items: Vec<_> = catalog.items.values().collect();
+        let mut parent = comparison("choice-fence", Some(200));
+        for (index, item) in items.iter().enumerate() {
+            let ContentKind::Repertoire {
+                repertoire,
+                position,
+            } = &item.definition.kind
+            else {
+                unreachable!()
+            };
+            parent.summary.choices.push(GameChoice {
+                ply: 1 + index * 2,
+                position: position.0.clone(),
+                candidates: vec![GameChoiceTarget {
+                    repertoire_id: repertoire.clone(),
+                    target_id: item.target.clone(),
+                    version: item.version,
+                }],
+            });
+        }
+        parent.relevance = Some(ComparedRelevance {
+            content_revision,
+            ..ComparedRelevance::default()
+        });
+        store
+            .commit_games(commit(), &[parent.clone()], None, receipt("compare"))
+            .unwrap();
+        let mutation = |index: usize, prior_choices, encounters| {
+            let candidate = &parent.summary.choices[index];
+            let item = items[index];
+            let mut child = parent.clone();
+            child.id = format!("saved-choice-{index}");
+            child.summary.choices.clear();
+            child.resolved_choice = Some(AcceptedGameChoice {
+                comparison_id: parent.id.clone(),
+                ply: candidate.ply,
+                position: candidate.position.clone(),
+                attribution: ChoiceAttribution {
+                    target: item.target.clone(),
+                    answer_version: item.version,
+                },
+            });
+            child.observations = vec![GameObservation {
+                ply: candidate.ply,
+                target: item.target.clone(),
+                version: item.version,
+                played: "c2c4".into(),
+                prescribed: item.definition.decisions[0].expected.uci.clone(),
+            }];
+            child.relevance = Some(ComparedRelevance {
+                encounters,
+                prior_choices,
+                content_revision,
+                ..ComparedRelevance::default()
+            });
+            child
+        };
+        let first_encounters =
+            BTreeMap::from([(items[0].target.clone(), (items[0].version, true))]);
+        let first = mutation(0, Default::default(), first_encounters.clone());
+        store
+            .commit_games(commit(), &[first], None, receipt("first"))
+            .unwrap();
+
+        let mut reader = SqliteStore::open(&path).unwrap();
+        let prior_choices = reader
+            .game_choices(&dataset, "pgn", &parent.game.id)
+            .unwrap();
+        let key = reader
+            .choice_encounter_keys(&dataset, None)
+            .unwrap()
+            .remove(0);
+        let stale_repair = EncounterRepair {
+            key,
+            choices: prior_choices.clone(),
+            encounters: first_encounters.clone(),
+        };
+        let mut final_encounters = first_encounters;
+        final_encounters.insert(items[1].target.clone(), (items[1].version, true));
+        let second = mutation(1, prior_choices.clone(), final_encounters);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_choice_receipt BEFORE INSERT ON game_receipts
+             BEGIN SELECT RAISE(ABORT, 'late choice receipt failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            store
+                .commit_games(commit(), &[second.clone()], None, receipt("second"))
+                .is_err()
+        );
+        assert_eq!(
+            reader
+                .game_choices(&dataset, "pgn", &parent.game.id)
+                .unwrap(),
+            prior_choices
+        );
+        assert!(
+            !reader
+                .game_relevance(&dataset, "")
+                .unwrap()
+                .contains_key(&items[1].target)
+        );
+        assert!(
+            reader
+                .game_receipt(&dataset, "second", "second")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(reader.snapshot().unwrap(), before);
+        store
+            .connection
+            .execute("DROP TRIGGER reject_choice_receipt", [])
+            .unwrap();
+        store
+            .commit_games(commit(), &[second], None, receipt("second"))
+            .unwrap();
+        assert_eq!(
+            reader.snapshot().unwrap(),
+            before,
+            "no-grade choices preserve the Study revision and state"
+        );
+        assert!(matches!(
+            reader.repair_choice_encounters(&dataset, content_revision, &[stale_repair]),
+            Err(StoreError::Conflict(_))
+        ));
+        let mut stale = parent;
+        stale.relevance.as_mut().unwrap().prior_choices = prior_choices;
+        assert!(matches!(
+            reader.commit_games(commit(), &[stale], None, receipt("stale")),
+            Err(StoreError::Conflict(_))
+        ));
+        assert_eq!(
+            reader.game_relevance(&dataset, "").unwrap()[&items[1].target].misses,
+            1
+        );
+    }
+
+    #[test]
     fn a_late_timing_conflict_rolls_back_earlier_enrichment_and_the_receipt() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = DatasetId("games".into());
