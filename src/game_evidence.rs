@@ -259,6 +259,9 @@ pub struct GameCommit {
 pub struct GameHistoryEntry {
     pub comparison_id: String,
     pub summary: GameSummary,
+    pub white: String,
+    pub black: String,
+    pub played_date_ms: Option<u64>,
 }
 
 #[derive(Default, Debug)]

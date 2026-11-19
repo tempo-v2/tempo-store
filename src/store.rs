@@ -114,6 +114,18 @@ pub trait Store {
         Err(StoreError::Unsupported("repertoire_document"))
     }
 
+    /// Current-version introduction facts for the addressed game positions in one repertoire.
+    /// An absent entry has no active learning target. Reject a changed content basis.
+    fn repertoire_introductions(
+        &self,
+        _dataset: &DatasetId,
+        _revision: Revision,
+        _repertoire: &str,
+        _positions: &[tempo_chess::PositionKey],
+    ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
+        Err(StoreError::Unsupported("repertoire_introductions"))
+    }
+
     /// Clear one repertoire's Study records and publish its reset receipt atomically.
     fn reset_repertoire(
         &mut self,

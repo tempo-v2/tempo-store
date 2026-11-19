@@ -683,8 +683,11 @@ impl SqliteStore {
         let results = {
             let mut statement = tx
                 .prepare(
-                    "SELECT comparison.dataset_id, comparison.id, comparison.summary
+                    "SELECT comparison.dataset_id, comparison.id, comparison.summary,
+                        game.white, game.black, coalesce(game.start_ms, game.played_date_ms, game.end_ms)
                  FROM game_comparisons AS comparison
+                 JOIN games AS game ON (game.dataset_id,game.source,game.id)=
+                                      (comparison.dataset_id,comparison.source,comparison.game_id)
                  WHERE comparison.dataset_id=(SELECT dataset_id FROM store_state WHERE singleton=1)
                  ORDER BY comparison.ordinal DESC LIMIT 100",
                 )
@@ -695,12 +698,16 @@ impl SqliteStore {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<u64>>(5)?,
                     ))
                 })
                 .map_err(database_error)?;
             let mut results = Vec::new();
             for record in records {
-                let (dataset, comparison, summary) = record.map_err(database_error)?;
+                let (dataset, comparison, summary, white, black, played_date_ms) =
+                    record.map_err(database_error)?;
                 let mut summary: crate::GameSummary = row_values::decode(&summary)?;
                 if !summary.choices.is_empty() {
                     let resolved: Vec<String> = row_values::read_selected(
@@ -720,6 +727,9 @@ impl SqliteStore {
                 results.push(GameHistoryEntry {
                     comparison_id: comparison,
                     summary,
+                    white,
+                    black,
+                    played_date_ms,
                 });
             }
             results
