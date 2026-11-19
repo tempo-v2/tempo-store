@@ -121,6 +121,47 @@ pub struct GameFailureKey {
     pub chosen_position: Option<String>,
 }
 
+impl GameFailureKey {
+    /// Stable identity shared by the game comparison producer and Store.
+    pub fn assessment_key(&self) -> crate::AssessmentKey {
+        let identity = serde_json::json!([self.game_id, self.target]);
+        crate::AssessmentKey::External {
+            provider: format!("game:{}", self.source),
+            event_id: tempo_types::EventId(
+                blake3::hash(identity.to_string().as_bytes())
+                    .to_hex()
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Games acceptance facts independent of raw games, comparisons and receipts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortableGameEvidence {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub game_failures: Vec<GameFailureKey>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub repertoire_reset_boundaries: std::collections::BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_game_choices: Vec<ResolvedGameChoice>,
+}
+
+impl PortableGameEvidence {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.game_failures.is_empty()
+            && self.repertoire_reset_boundaries.is_empty()
+            && self.resolved_game_choices.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedGameChoice {
+    pub source: String,
+    pub game_id: String,
+    pub position: String,
+}
+
 pub struct LegacyGameMiss {
     pub source: String,
     pub game_id: String,

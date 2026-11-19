@@ -48,5 +48,5 @@ mod game_evidence;
 pub use game_evidence::{
     AcceptedGames, ComparedGame, GameChoice, GameChoiceTarget, GameCommit, GameFailureKey,
     GameHistory, GameHistoryEntry, GameObservation, GameReceipt, GameRecord, GameSummary,
-    LegacyGameMiss, PgnTiming, RepertoireDisagreement,
+    LegacyGameMiss, PgnTiming, PortableGameEvidence, RepertoireDisagreement, ResolvedGameChoice,
 };
