@@ -14,7 +14,9 @@ use tempo_chess::{Catalog, ContentItem};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
+mod game_choices;
 mod game_evidence;
+mod game_model;
 mod game_relevance;
 mod load_snapshot;
 mod load_study;
@@ -25,7 +27,10 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 10;
+pub use game_choices::ChoiceMigrationReport;
+
+const SCHEMA_VERSION: i64 = 11;
+const CORRECTIVE_RELEASE_SCHEMA: &str = include_str!("sqlite_store/corrective_release.sql");
 const GAME_RELEVANCE_SCHEMA: &str = include_str!("sqlite_store/game_relevance.sql");
 const PORTABLE_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/portable_evidence.sql");
 const GAME_CORRECTIONS_SCHEMA: &str = include_str!("sqlite_store/game_corrections.sql");
@@ -59,6 +64,7 @@ const REPERTOIRE_DOCUMENT_SCHEMA: &str = include_str!("sqlite_store/repertoire_d
 /// ```
 pub struct SqliteStore {
     connection: Connection,
+    choice_migration: Option<ChoiceMigrationReport>,
 }
 
 impl SqliteStore {
@@ -124,6 +130,9 @@ impl SqliteStore {
             .execute_batch(GAME_RELEVANCE_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(CORRECTIVE_RELEASE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -134,7 +143,10 @@ impl SqliteStore {
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            choice_migration: None,
+        })
     }
 
     /// List saved content sources for local provenance reconciliation.
@@ -181,7 +193,8 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2..=9) {
+        let mut choice_migration = None;
+        if matches!(schema_version(&connection)?, 2..=10) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -230,6 +243,13 @@ impl SqliteStore {
             if schema_version(&tx)? == 9 {
                 tx.execute_batch(GAME_RELEVANCE_SCHEMA)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 10)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 10 {
+                tx.execute_batch(CORRECTIVE_RELEASE_SCHEMA)
+                    .map_err(database_error)?;
+                choice_migration = Some(game_choices::migrate(&tx)?);
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -241,9 +261,37 @@ impl SqliteStore {
                 "unsupported SQLite store version {version}"
             )));
         }
-        let store = Self { connection };
+        let store = Self {
+            connection,
+            choice_migration,
+        };
         store.study_state(StudyScope::default())?;
         Ok(store)
+    }
+
+    /// Counts for an upgrade performed by this opening of the database.
+    pub fn choice_migration_report(&self) -> Option<&ChoiceMigrationReport> {
+        self.choice_migration.as_ref()
+    }
+
+    /// Cheap local-runtime trigger. Model preparation runs separately.
+    pub fn model_content_marker(&self) -> Result<(DatasetId, Revision), StoreError> {
+        self.connection
+            .query_row(
+                "SELECT dataset_id,content_revision FROM store_state WHERE singleton=1",
+                [],
+                |row| Ok((DatasetId(row.get(0)?), Revision(row.get(1)?))),
+            )
+            .map_err(database_error)
+    }
+
+    /// Read desired books, source associations and active target facts at one revision.
+    pub fn projection_books(
+        &self,
+        dataset: &DatasetId,
+        scope: crate::ProjectionScope,
+    ) -> Result<Vec<crate::ProjectionBook>, StoreError> {
+        game_model::books(&self.connection, dataset, scope)
     }
 }
 
@@ -376,30 +424,35 @@ impl Store for SqliteStore {
         saved.as_deref().map(row_values::decode).transpose()
     }
 
-    fn game_choice_resolved(
+    fn game_choices(
         &self,
         dataset: &DatasetId,
         source: &str,
         game_id: &str,
-        position: &str,
-    ) -> Result<bool, StoreError> {
-        self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM game_choice_boundaries WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND position=?4 UNION SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND chosen_position=?4)",
-            params![dataset.0, source, game_id, position], |row| row.get(0)
-        ).map_err(database_error)
+    ) -> Result<crate::GameChoices, StoreError> {
+        game_choices::read(&self.connection, dataset, source, game_id)
     }
 
-    fn game_target_chosen(
+    fn choice_encounter_keys(
         &self,
         dataset: &DatasetId,
-        key: &crate::GameFailureKey,
-    ) -> Result<bool, StoreError> {
-        self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3
-             AND target_id=?4 AND version=?5 AND chosen_position=?6)",
-            params![dataset.0, key.source, key.game_id, key.target.0, key.version.0.to_be_bytes().as_slice(),
-                key.chosen_position], |row| row.get(0),
-        ).map_err(database_error)
+        after: Option<&crate::EncounterKey>,
+    ) -> Result<Vec<crate::EncounterKey>, StoreError> {
+        game_relevance::choice_encounter_keys(&self.connection, dataset, after)
+    }
+
+    fn repair_choice_encounters(
+        &mut self,
+        dataset: &DatasetId,
+        content_revision: Revision,
+        repairs: &[crate::EncounterRepair],
+    ) -> Result<usize, StoreError> {
+        game_relevance::repair_choice_encounters(
+            &mut self.connection,
+            dataset,
+            content_revision,
+            repairs,
+        )
     }
 
     fn game_failed(
@@ -432,6 +485,7 @@ impl Store for SqliteStore {
         &mut self,
         commit: Commit,
         evidence: &crate::PortableGameEvidence,
+        choice_format: crate::PortableChoiceFormat,
     ) -> Result<Revision, StoreError> {
         if !matches!(commit.writes.as_slice(), [Write::Restore { .. }]) {
             return Err(invalid("portable evidence requires a dataset restore"));
@@ -443,7 +497,7 @@ impl Store for SqliteStore {
         let previous = load_snapshot(&tx)?;
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&tx, Some(&previous), &next)?;
-        game_evidence::save_portable_evidence(&tx, &next, evidence)?;
+        game_evidence::save_portable_evidence(&tx, &next, evidence, choice_format)?;
         tx.commit().map_err(database_error)?;
         Ok(next.revision)
     }
@@ -549,7 +603,7 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         id: &str,
         state: &str,
-        accounts: Option<&[(String, String)]>,
+        accounts_to_recognize: Option<&[(String, String)]>,
     ) -> Result<(), StoreError> {
         let tx = self
             .connection
@@ -562,19 +616,18 @@ impl Store for SqliteStore {
             params![dataset.0, id, state],
         )
         .map_err(database_error)?;
-        if let Some(accounts) = accounts {
-            tx.execute(
-                "DELETE FROM game_learner_accounts WHERE dataset_id=?1",
-                [&dataset.0],
-            )
-            .map_err(database_error)?;
-            for (source, learner) in accounts {
-                tx.execute(
-                    "INSERT INTO game_learner_accounts VALUES (?1,?2,?3)",
+        let mut recognition_changed = false;
+        for (source, learner) in accounts_to_recognize.unwrap_or_default() {
+            recognition_changed |= tx
+                .execute(
+                    "INSERT INTO game_learner_accounts VALUES (?1,?2,?3)
+                     ON CONFLICT(dataset_id,source,learner) DO NOTHING",
                     params![dataset.0, source, learner],
                 )
-                .map_err(database_error)?;
-            }
+                .map_err(database_error)?
+                != 0;
+        }
+        if recognition_changed {
             game_relevance::rebuild(&tx, &dataset.0)?;
         }
         tx.commit().map_err(database_error)
@@ -615,41 +668,38 @@ impl Store for SqliteStore {
     fn replace_game_model_reach(
         &mut self,
         dataset: &DatasetId,
-        model: &str,
-        content_revision: Revision,
-        reach: &std::collections::BTreeMap<TargetId, u32>,
+        projection: crate::BookProjection<'_>,
     ) -> Result<(), StoreError> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
-        game_relevance::check_dataset(&tx, dataset)?;
-        let active: u64 = tx
-            .query_row(
-                "SELECT content_revision FROM store_state WHERE singleton=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(database_error)?;
-        if active != content_revision.0 {
-            return Err(conflict("content changed during model projection"));
-        }
-        tx.execute(
-            "DELETE FROM game_model_reach WHERE dataset_id=?1 AND model_key=?2",
-            params![dataset.0, model],
+        game_model::replace(&mut self.connection, dataset, projection)
+    }
+
+    fn game_model_projection_status(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
+        game_model::status(&self.connection, dataset).map(Some)
+    }
+
+    fn model_bootstrap_repertoires(&self, dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
+        game_model::bootstrap_repertoires(&self.connection, dataset)
+    }
+
+    fn finish_model_bootstrap(
+        &mut self,
+        dataset: &DatasetId,
+        content_revision: Revision,
+        repertoire: &str,
+        source_id: &str,
+        stamp: Option<&crate::ModelInputStamp>,
+    ) -> Result<(), StoreError> {
+        game_model::finish_bootstrap(
+            &mut self.connection,
+            dataset,
+            content_revision,
+            repertoire,
+            source_id,
+            stamp,
         )
-        .map_err(database_error)?;
-        {
-            let mut insert = tx
-                .prepare("INSERT INTO game_model_reach VALUES (?1,?2,?3,?4,?5)")
-                .map_err(database_error)?;
-            for (target, millionths) in reach {
-                insert
-                    .execute(params![dataset.0, model, active, target.0, millionths])
-                    .map_err(database_error)?;
-            }
-        }
-        tx.commit().map_err(database_error)
     }
 
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
@@ -821,19 +871,24 @@ impl Store for SqliteStore {
     }
 
     fn repertoire_document(&self, id: &str) -> Result<RepertoireDocument, StoreError> {
-        let (dataset, revision, item, pgn): (_, u64, Option<String>, _) = self.connection
+        let (dataset, revision, item, pgn, source_id, authority):
+            (_, u64, Option<String>, Option<String>, _, Option<String>) = self.connection
             .query_row(
                 "SELECT state.dataset_id, state.content_revision,
                         (SELECT item FROM current_content
                          WHERE dataset_id=state.dataset_id AND repertoire=?1 ORDER BY target_id LIMIT 1),
-                        source.pgn
+                        CASE WHEN input.state='unavailable' THEN NULL ELSE source.pgn END,
+                        document.source_id,input.state
                  FROM store_state AS state
                  LEFT JOIN repertoire_documents AS document
                     ON document.dataset_id=state.dataset_id AND document.repertoire_id=?1
                  LEFT JOIN content_sources AS source ON source.id=document.source_id
+                 LEFT JOIN game_model_inputs AS input
+                    ON (input.dataset_id,input.repertoire_id)=(document.dataset_id,document.repertoire_id)
                  WHERE state.singleton=1",
                 [id],
-                |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                    row.get(4)?, row.get(5)?)),
             )
             .map_err(database_error)?;
         Ok(RepertoireDocument {
@@ -841,6 +896,12 @@ impl Store for SqliteStore {
             revision: Revision(revision),
             item: item.as_deref().map(row_values::decode).transpose()?,
             pgn,
+            source_id,
+            model_authority: match authority.as_deref() {
+                Some("needs_bootstrap") => crate::ModelAuthority::NeedsBootstrap,
+                Some("verified") => crate::ModelAuthority::Verified,
+                _ => crate::ModelAuthority::Unavailable,
+            },
         })
     }
 
@@ -866,6 +927,13 @@ impl Store for SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let dataset = commit.expected_dataset.clone();
+        if let Some(ContentSource::RepertoireDocument {
+            expected_content_revision,
+            ..
+        }) = &source
+        {
+            game_relevance::check_content_revision(&transaction, *expected_content_revision)?;
+        }
         let no_writes_with_receipt = commit.writes.is_empty() && receipt.is_some();
         let (mut revision, catalog_changed) = if no_writes_with_receipt {
             let current = load_study::load_study(&transaction, StudyScope::default())?;
@@ -891,7 +959,9 @@ impl Store for SqliteStore {
                     id,
                     pgn,
                     repertoire_id,
-                } => (id, pgn, Some(repertoire_id)),
+                    model_input,
+                    ..
+                } => (id, pgn, Some((repertoire_id, model_input))),
             };
             let inserted = transaction
                 .execute(
@@ -913,7 +983,7 @@ impl Store for SqliteStore {
                     ));
                 }
             }
-            if let Some(repertoire) = repertoire {
+            if let Some((repertoire, model_input)) = repertoire {
                 let exists: bool = transaction
                     .query_row(
                         "SELECT EXISTS (SELECT 1 FROM current_content
@@ -928,12 +998,14 @@ impl Store for SqliteStore {
                     ));
                 }
                 let changed = transaction.execute(
-                    "INSERT INTO repertoire_documents VALUES (?1, ?2, ?3)
+                    "INSERT INTO repertoire_documents (dataset_id,repertoire_id,source_id) VALUES (?1, ?2, ?3)
                      ON CONFLICT(dataset_id, repertoire_id) DO UPDATE SET source_id=excluded.source_id
                      WHERE source_id<>excluded.source_id",
                     params![dataset.0, repertoire, id],
                 ).map_err(database_error)? != 0;
-                if changed && !catalog_changed {
+                let verified =
+                    game_model::set_verified(&transaction, &dataset, repertoire, model_input)?;
+                if (changed || verified) && !catalog_changed {
                     if no_writes_with_receipt {
                         revision = Revision(
                             revision

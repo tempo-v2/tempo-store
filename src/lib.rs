@@ -44,10 +44,16 @@ pub use store_error::StoreError;
 pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, StoredAttempt};
 pub use write::Write;
 
+mod game_model;
+pub use game_model::{
+    BookProjection, ModelAuthority, ModelInputStamp, ModelTargets, ProjectionBook, ProjectionScope,
+    ProjectionStatus, REACH_MODEL_KEY, model_lines, model_targets,
+};
 mod game_evidence;
 pub use game_evidence::{
-    AcceptedGames, ComparedGame, ComparedRelevance, GameChoice, GameChoiceTarget, GameCommit,
-    GameFailureKey, GameHistory, GameHistoryEntry, GameObservation, GameReceipt, GameRecord,
-    GameSummary, GameTargetRelevance, GroupedOpponentGap, LegacyGameMiss, PgnTiming,
-    PortableGameEvidence, RepertoireDisagreement, ResolvedGameChoice,
+    AcceptedGameChoice, AcceptedGames, ChoiceAttribution, ComparedGame, ComparedRelevance,
+    EncounterKey, EncounterRepair, GameChoice, GameChoiceTarget, GameChoices, GameCommit,
+    GameEncounters, GameFailureKey, GameHistory, GameHistoryEntry, GameObservation, GameReceipt,
+    GameRecord, GameSummary, GameTargetRelevance, GroupedOpponentGap, LegacyGameMiss, PgnTiming,
+    PortableChoiceFormat, PortableGameEvidence, RepertoireDisagreement, ResolvedGameChoice,
 };

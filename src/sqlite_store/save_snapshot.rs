@@ -16,6 +16,14 @@ pub(super) fn save_snapshot(
     let replace_catalog =
         previous.is_none_or(|old| old.dataset != next.dataset || old.catalog != next.catalog);
     if replace_catalog {
+        if let Some(old) = previous.filter(|old| old.dataset == next.dataset) {
+            super::game_model::catalog_changed(
+                transaction,
+                &next.dataset,
+                &old.catalog,
+                &next.catalog,
+            )?;
+        }
         save_catalog(transaction, next)?;
         if previous.is_some() {
             transaction

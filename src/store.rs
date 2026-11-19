@@ -29,6 +29,8 @@ pub enum ContentSource<'a> {
         id: &'a str,
         pgn: &'a str,
         repertoire_id: &'a str,
+        expected_content_revision: Revision,
+        model_input: &'a crate::ModelInputStamp,
     },
 }
 
@@ -39,6 +41,8 @@ pub struct RepertoireDocument {
     pub revision: Revision,
     pub item: Option<ContentItem>,
     pub pgn: Option<String>,
+    pub source_id: Option<String>,
+    pub model_authority: crate::ModelAuthority,
 }
 
 /// The same command may be delivered again without changing newer learning.
@@ -243,22 +247,36 @@ pub trait Store {
         Ok(None)
     }
 
-    fn game_choice_resolved(
+    /// Read all closed positions and their accepted attribution, if it is known.
+    fn game_choices(
         &self,
         _dataset: &DatasetId,
         _source: &str,
         _game_id: &str,
-        _position: &str,
-    ) -> Result<bool, StoreError> {
-        Ok(false)
+    ) -> Result<crate::GameChoices, StoreError> {
+        Ok(Default::default())
     }
 
-    fn game_target_chosen(
+    /// Page through existing relevance inputs for games with accepted choices.
+    fn choice_encounter_keys(
         &self,
         _dataset: &DatasetId,
-        _key: &crate::GameFailureKey,
-    ) -> Result<bool, StoreError> {
-        Ok(false)
+        _after: Option<&crate::EncounterKey>,
+    ) -> Result<Vec<crate::EncounterKey>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Replace only encounter maps, under their content and exact choice fences.
+    /// Return how many maps actually changed. No game acceptance records are written.
+    fn repair_choice_encounters(
+        &mut self,
+        _dataset: &DatasetId,
+        _content_revision: Revision,
+        _repairs: &[crate::EncounterRepair],
+    ) -> Result<usize, StoreError> {
+        Err(invalid(
+            "this Store does not support encounter reconciliation",
+        ))
     }
 
     fn game_failed(
@@ -321,6 +339,7 @@ pub trait Store {
         &mut self,
         commit: Commit,
         evidence: &crate::PortableGameEvidence,
+        _choice_format: crate::PortableChoiceFormat,
     ) -> Result<Revision, StoreError> {
         if !evidence.is_empty() {
             return Err(invalid(
@@ -357,12 +376,14 @@ pub trait Store {
         Err(invalid("this Store does not support historical backfill"))
     }
 
+    /// Persist the job and add any explicitly recognized identities atomically.
+    /// Progress-only writes supply no accounts; existing recognition is retained.
     fn save_game_backfill_state(
         &mut self,
         _dataset: &DatasetId,
         _id: &str,
         _state: &str,
-        _accounts: Option<&[(String, String)]>,
+        _accounts_to_recognize: Option<&[(String, String)]>,
     ) -> Result<(), StoreError> {
         Err(invalid("this Store does not support historical backfill"))
     }
@@ -387,11 +408,34 @@ pub trait Store {
     fn replace_game_model_reach(
         &mut self,
         _dataset: &DatasetId,
-        _model: &str,
-        _content_revision: Revision,
-        _reach: &std::collections::BTreeMap<TargetId, u32>,
+        _projection: crate::BookProjection<'_>,
     ) -> Result<(), StoreError> {
         Err(invalid("this Store does not support modeled reach"))
+    }
+
+    fn game_model_projection_status(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
+        Ok(None)
+    }
+
+    fn model_bootstrap_repertoires(&self, _dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Accept one legacy source verification only while the original source is current.
+    fn finish_model_bootstrap(
+        &mut self,
+        _dataset: &DatasetId,
+        _content_revision: Revision,
+        _repertoire: &str,
+        _source_id: &str,
+        _stamp: Option<&crate::ModelInputStamp>,
+    ) -> Result<(), StoreError> {
+        Err(invalid(
+            "this Store does not support model source verification",
+        ))
     }
 
     /// The recent answer-safe comparison records for the active dataset.

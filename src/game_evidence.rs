@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempo_chess::{OpponentGap, RepertoireAdherence};
-use tempo_types::{ContentVersion, TargetId};
+use tempo_types::{ContentVersion, Revision, TargetId};
 
 #[derive(Clone, Debug)]
 pub struct GameRecord {
@@ -68,7 +68,7 @@ pub struct ComparedGame {
     pub summary: GameSummary,
     pub observations: Vec<GameObservation>,
     pub failures: Vec<crate::AssessmentRecord>,
-    pub resolved_choice: Option<(String, usize, String)>,
+    pub resolved_choice: Option<AcceptedGameChoice>,
     pub relevance: Option<ComparedRelevance>,
 }
 
@@ -167,6 +167,50 @@ pub struct ResolvedGameChoice {
     pub source: String,
     pub game_id: String,
     pub position: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<ChoiceAttribution>,
+}
+
+/// The exact answer accepted by an explicit choice, independent of any grade.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChoiceAttribution {
+    pub target: TargetId,
+    pub answer_version: ContentVersion,
+}
+
+/// A native resolution carries the saved comparison and the required selection.
+#[derive(Clone, Debug)]
+pub struct AcceptedGameChoice {
+    pub comparison_id: String,
+    pub ply: usize,
+    pub position: String,
+    pub attribution: ChoiceAttribution,
+}
+
+/// Position keys carry closure even when their historical attribution is unknown.
+pub type GameChoices = BTreeMap<String, Option<ChoiceAttribution>>;
+
+/// Earlier exports carried failure positions and optional closure, but no selected answer.
+pub enum PortableChoiceFormat {
+    Legacy,
+    Attributed,
+}
+
+/// An existing game/learner projection eligible for evidence-only reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EncounterKey {
+    pub source: String,
+    pub game_id: String,
+    pub learner: String,
+}
+
+pub type GameEncounters = BTreeMap<TargetId, (ContentVersion, bool)>;
+
+/// Complete replacement from current Chess facts and the exact accepted choices read.
+pub struct EncounterRepair {
+    pub key: EncounterKey,
+    pub choices: GameChoices,
+    pub encounters: GameEncounters,
 }
 
 pub struct LegacyGameMiss {
@@ -221,8 +265,10 @@ pub struct AcceptedGames {
 /// One analyzed game supplies position encounters and current answer comparisons.
 #[derive(Clone, Debug, Default)]
 pub struct ComparedRelevance {
-    pub encounters: BTreeMap<TargetId, (ContentVersion, bool)>,
+    pub encounters: GameEncounters,
     pub gaps: BTreeMap<OpponentGap, String>,
+    pub prior_choices: GameChoices,
+    pub content_revision: Revision,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -380,6 +380,11 @@ fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
         )
         .unwrap();
 
+    let stamp = crate::ModelInputStamp {
+        key: "fixture-model-input".into(),
+        targets: crate::model_targets(&catalog, repertoire),
+    };
+    let content_revision = store.model_content_marker().unwrap().1;
     let save = |store: &mut SqliteStore| {
         store.commit_content(
             commit.clone(),
@@ -387,6 +392,8 @@ fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
                 id: "source",
                 pgn: "1. e4 *",
                 repertoire_id: repertoire,
+                expected_content_revision: content_revision,
+                model_input: &stamp,
             }),
             Some(ContentReceipt {
                 request: "request",
