@@ -67,6 +67,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.route != previous.route
                 || record.first_introduction != previous.first_introduction
                 || record.exercise_name != previous.exercise_name
+                || record.relevance_reason != previous.relevance_reason
                 || record.lesson != previous.lesson
                 || (previous.acceptance.is_some() && record.acceptance != previous.acceptance)
                 || (record.mode.guided() && next.terminal.is_some())

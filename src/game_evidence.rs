@@ -1,6 +1,8 @@
 //! Store records for game ingestion. Study never reads raw games to select work.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use tempo_chess::{OpponentGap, RepertoireAdherence};
 use tempo_types::{ContentVersion, TargetId};
 
 #[derive(Clone, Debug)]
@@ -67,6 +69,7 @@ pub struct ComparedGame {
     pub observations: Vec<GameObservation>,
     pub failures: Vec<crate::AssessmentRecord>,
     pub resolved_choice: Option<(String, usize, String)>,
+    pub relevance: Option<ComparedRelevance>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +92,10 @@ pub struct GameSummary {
     pub choices: Vec<GameChoice>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disagreements: Vec<RepertoireDisagreement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repertoires: Vec<RepertoireAdherence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfill_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,4 +216,26 @@ pub struct GameReceipt<'a> {
 pub struct AcceptedGames {
     pub counts: GameCommit,
     pub report: String,
+}
+
+/// One analyzed game supplies position encounters and current answer comparisons.
+#[derive(Clone, Debug, Default)]
+pub struct ComparedRelevance {
+    pub encounters: BTreeMap<TargetId, (ContentVersion, bool)>,
+    pub gaps: BTreeMap<OpponentGap, String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GameTargetRelevance {
+    pub exposure: u32,
+    pub misses: u32,
+    pub window_games: u32,
+    pub modeled_millionths: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupedOpponentGap {
+    #[serde(flatten)]
+    pub gap: OpponentGap,
+    pub games: usize,
 }

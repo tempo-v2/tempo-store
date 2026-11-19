@@ -280,6 +280,7 @@ impl SqliteStore {
 
         let dataset = &previous.dataset.0;
         let mut result = GameCommit::default();
+        let mut relevance_changed = false;
         for entry in games {
             let game = &entry.game;
             let raw = transaction
@@ -361,6 +362,10 @@ impl SqliteStore {
                     Some(assessment),
                 )?;
             }
+            if let Some(relevance) = &entry.relevance {
+                super::game_relevance::save_facts(&transaction, dataset, entry, relevance)?;
+                relevance_changed = true;
+            }
             let compared = transaction
                 .execute(
                     "INSERT INTO game_comparisons(dataset_id,id,source,game_id,summary)
@@ -419,6 +424,9 @@ impl SqliteStore {
         if !commit.writes.is_empty() {
             let next = stage_commit(&previous, commit)?;
             save_snapshot(&transaction, Some(&previous), &next)?;
+        }
+        if relevance_changed {
+            super::game_relevance::rebuild(&transaction, dataset)?;
         }
         let accepted = AcceptedGames {
             counts: GameCommit {
@@ -615,6 +623,7 @@ mod tests {
             id: format!("comparison-{id}"),
             failures: vec![],
             resolved_choice: None,
+            relevance: None,
             summary: GameSummary {
                 source: "pgn".into(),
                 game_id: id.into(),
@@ -630,6 +639,8 @@ mod tests {
                 correction_effect: None,
                 choices: vec![],
                 disagreements: vec![],
+                repertoires: vec![],
+                backfill_id: None,
             },
             observations: vec![],
         }

@@ -66,6 +66,8 @@ pub struct StoredAttempt {
     #[serde(default, rename = "repertoire_name")]
     pub exercise_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relevance_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lesson: Option<tempo_chess::RepertoireLesson>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<ActivityAcceptance>,

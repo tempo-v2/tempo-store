@@ -15,6 +15,7 @@ use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
 mod game_evidence;
+mod game_relevance;
 mod load_snapshot;
 mod load_study;
 mod repertoire_resets;
@@ -24,7 +25,8 @@ mod save_snapshot;
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
+const GAME_RELEVANCE_SCHEMA: &str = include_str!("sqlite_store/game_relevance.sql");
 const PORTABLE_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/portable_evidence.sql");
 const GAME_CORRECTIONS_SCHEMA: &str = include_str!("sqlite_store/game_corrections.sql");
 const REPERTOIRE_RESET_SCHEMA: &str = include_str!("sqlite_store/repertoire_resets.sql");
@@ -119,6 +121,9 @@ impl SqliteStore {
             .execute_batch(PORTABLE_EVIDENCE_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(GAME_RELEVANCE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -176,7 +181,7 @@ impl SqliteStore {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
-        if matches!(schema_version(&connection)?, 2..=8) {
+        if matches!(schema_version(&connection)?, 2..=9) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -218,6 +223,12 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 8 {
                 tx.execute_batch(PORTABLE_EVIDENCE_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 9)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 9 {
+                tx.execute_batch(GAME_RELEVANCE_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
@@ -271,6 +282,20 @@ impl Store for SqliteStore {
             params![dataset.0, repertoire],
             |row| row.get(0),
         ).map_err(database_error)
+    }
+
+    fn repertoire_reset_generation(
+        &self,
+        dataset: &DatasetId,
+        repertoire: &str,
+    ) -> Result<u64, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT count(*) FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2",
+                params![dataset.0, repertoire],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
     }
 
     fn commit_games(
@@ -364,6 +389,19 @@ impl Store for SqliteStore {
         ).map_err(database_error)
     }
 
+    fn game_target_chosen(
+        &self,
+        dataset: &DatasetId,
+        key: &crate::GameFailureKey,
+    ) -> Result<bool, StoreError> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3
+             AND target_id=?4 AND version=?5 AND chosen_position=?6)",
+            params![dataset.0, key.source, key.game_id, key.target.0, key.version.0.to_be_bytes().as_slice(),
+                key.chosen_position], |row| row.get(0),
+        ).map_err(database_error)
+    }
+
     fn game_failed(
         &self,
         dataset: &DatasetId,
@@ -439,6 +477,179 @@ impl Store for SqliteStore {
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)
+    }
+
+    fn historical_pgn_window(
+        &self,
+        dataset: &DatasetId,
+        learner: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<crate::GameRecord>, StoreError> {
+        let mut query = self.connection.prepare_cached(
+            "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms
+             FROM games WHERE dataset_id=?1 AND source='pgn' AND (lower(white)=?2) != (lower(black)=?2)
+             AND coalesce(start_ms,end_ms,played_date_ms)>=?3 AND coalesce(start_ms,end_ms,played_date_ms)<?4
+             ORDER BY coalesce(start_ms,end_ms,played_date_ms),id LIMIT 501"
+        ).map_err(database_error)?;
+        query
+            .query_map(
+                params![dataset.0, learner, from, to],
+                game_evidence::game_row,
+            )
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)
+    }
+
+    fn game_relevance(
+        &self,
+        dataset: &DatasetId,
+        model: &str,
+    ) -> Result<std::collections::BTreeMap<TargetId, crate::GameTargetRelevance>, StoreError> {
+        game_relevance::read(&self.connection, dataset, model)
+    }
+
+    fn game_content_revision(&self, dataset: &DatasetId) -> Result<Option<Revision>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT content_revision FROM store_state WHERE singleton=1 AND dataset_id=?1",
+                [&dataset.0],
+                |row| row.get::<_, u64>(0).map(Revision),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    fn opponent_gaps(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
+        game_relevance::gaps(&self.connection, dataset)
+    }
+
+    fn game_backfill_state(
+        &self,
+        dataset: &DatasetId,
+        id: Option<&str>,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT state FROM game_backfill_jobs WHERE dataset_id=?1 AND (?2 IS NULL OR id=?2)
+             ORDER BY rowid DESC LIMIT 1",
+                params![dataset.0, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    fn save_game_backfill_state(
+        &mut self,
+        dataset: &DatasetId,
+        id: &str,
+        state: &str,
+        accounts: Option<&[(String, String)]>,
+    ) -> Result<(), StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        game_relevance::check_dataset(&tx, dataset)?;
+        tx.execute(
+            "INSERT INTO game_backfill_jobs VALUES (?1,?2,?3)
+             ON CONFLICT(dataset_id,id) DO UPDATE SET state=excluded.state",
+            params![dataset.0, id, state],
+        )
+        .map_err(database_error)?;
+        if let Some(accounts) = accounts {
+            tx.execute(
+                "DELETE FROM game_learner_accounts WHERE dataset_id=?1",
+                [&dataset.0],
+            )
+            .map_err(database_error)?;
+            for (source, learner) in accounts {
+                tx.execute(
+                    "INSERT INTO game_learner_accounts VALUES (?1,?2,?3)",
+                    params![dataset.0, source, learner],
+                )
+                .map_err(database_error)?;
+            }
+            game_relevance::rebuild(&tx, &dataset.0)?;
+        }
+        tx.commit().map_err(database_error)
+    }
+
+    fn game_move_distribution(
+        &self,
+        model: &str,
+        position: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, f64>>, StoreError> {
+        let json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT distribution FROM game_move_models WHERE model_key=?1 AND position=?2",
+                params![model, position],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        json.as_deref()
+            .map(game_relevance::decode_distribution)
+            .transpose()
+    }
+
+    fn save_game_move_distribution(
+        &mut self,
+        model: &str,
+        position: &str,
+        distribution: &std::collections::BTreeMap<String, f64>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO game_move_models VALUES (?1,?2,?3) ON CONFLICT(model_key,position) DO NOTHING",
+            params![model, position, row_values::encode(distribution)?],
+        ).map_err(database_error)?;
+        Ok(())
+    }
+
+    fn replace_game_model_reach(
+        &mut self,
+        dataset: &DatasetId,
+        model: &str,
+        content_revision: Revision,
+        reach: &std::collections::BTreeMap<TargetId, u32>,
+    ) -> Result<(), StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        game_relevance::check_dataset(&tx, dataset)?;
+        let active: u64 = tx
+            .query_row(
+                "SELECT content_revision FROM store_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if active != content_revision.0 {
+            return Err(conflict("content changed during model projection"));
+        }
+        tx.execute(
+            "DELETE FROM game_model_reach WHERE dataset_id=?1 AND model_key=?2",
+            params![dataset.0, model],
+        )
+        .map_err(database_error)?;
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO game_model_reach VALUES (?1,?2,?3,?4,?5)")
+                .map_err(database_error)?;
+            for (target, millionths) in reach {
+                insert
+                    .execute(params![dataset.0, model, active, target.0, millionths])
+                    .map_err(database_error)?;
+            }
+        }
+        tx.commit().map_err(database_error)
     }
 
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
