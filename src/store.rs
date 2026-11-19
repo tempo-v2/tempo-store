@@ -372,12 +372,14 @@ pub trait Store {
         Err(invalid("this Store does not support historical backfill"))
     }
 
+    /// Persist the job and add any explicitly recognized identities atomically.
+    /// Progress-only writes supply no accounts; existing recognition is retained.
     fn save_game_backfill_state(
         &mut self,
         _dataset: &DatasetId,
         _id: &str,
         _state: &str,
-        _accounts: Option<&[(String, String)]>,
+        _accounts_to_recognize: Option<&[(String, String)]>,
     ) -> Result<(), StoreError> {
         Err(invalid("this Store does not support historical backfill"))
     }

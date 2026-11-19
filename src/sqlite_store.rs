@@ -582,7 +582,7 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         id: &str,
         state: &str,
-        accounts: Option<&[(String, String)]>,
+        accounts_to_recognize: Option<&[(String, String)]>,
     ) -> Result<(), StoreError> {
         let tx = self
             .connection
@@ -595,19 +595,18 @@ impl Store for SqliteStore {
             params![dataset.0, id, state],
         )
         .map_err(database_error)?;
-        if let Some(accounts) = accounts {
-            tx.execute(
-                "DELETE FROM game_learner_accounts WHERE dataset_id=?1",
-                [&dataset.0],
-            )
-            .map_err(database_error)?;
-            for (source, learner) in accounts {
-                tx.execute(
-                    "INSERT INTO game_learner_accounts VALUES (?1,?2,?3)",
+        let mut recognition_changed = false;
+        for (source, learner) in accounts_to_recognize.unwrap_or_default() {
+            recognition_changed |= tx
+                .execute(
+                    "INSERT INTO game_learner_accounts VALUES (?1,?2,?3)
+                     ON CONFLICT(dataset_id,source,learner) DO NOTHING",
                     params![dataset.0, source, learner],
                 )
-                .map_err(database_error)?;
-            }
+                .map_err(database_error)?
+                != 0;
+        }
+        if recognition_changed {
             game_relevance::rebuild(&tx, &dataset.0)?;
         }
         tx.commit().map_err(database_error)
