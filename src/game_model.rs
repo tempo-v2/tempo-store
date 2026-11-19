@@ -55,7 +55,9 @@ pub struct ProjectionBook {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionScope {
-    Pending,
+    /// Verified books without a complete projection for their current input and algorithm.
+    MissingOrPartial,
+    /// Every verified book, regardless of projection state.
     AllVerified,
 }
 
