@@ -361,9 +361,9 @@ fn comparison_hash(value: serde_json::Value) -> String {
         .to_string()
 }
 
-// Schema 10 derived selected children from the wrapped parent even when the command used
-// its schema-9 alias. The child's retained adherence and backfill context reproduce that
-// wrapper exactly. The hash and exact historical observation must both match.
+// Both writers hashed the actual parent with the selected ply and target. When a
+// schema-10 command used a schema-9 parent alias, the child's retained adherence
+// and backfill context reproduce the wrapper that the writer hashed instead.
 fn accepted_child(
     tx: &Transaction<'_>,
     dataset: &str,
@@ -376,20 +376,22 @@ fn accepted_child(
 ) -> Result<bool, StoreError> {
     let selected_id =
         |wrapped: &str| comparison_hash(serde_json::json!([wrapped, ply, selected.target]));
-    let direct = (!parent.repertoires.is_empty()).then(|| selected_id(parent_id));
+    let direct = selected_id(parent_id);
+    let legacy_parent = parent.repertoires.is_empty();
     let children: Vec<(String, GameSummary)> = row_values::read_selected(
         tx,
         "SELECT child.id,child.summary FROM game_comparisons AS child
          JOIN game_observations AS observed
            ON (observed.dataset_id,observed.comparison_id)=(child.dataset_id,child.id)
          WHERE child.dataset_id=?1 AND child.source=?2 AND child.game_id=?3
-           AND (?4 IS NULL OR child.id=?4) AND json_extract(child.summary,'$.learner')=?5
-           AND observed.ply=?6 AND observed.target_id=?7 AND observed.version=?8
+           AND (?4 OR child.id=?5) AND json_extract(child.summary,'$.learner')=?6
+           AND observed.ply=?7 AND observed.target_id=?8 AND observed.version=?9
            AND observed.played<>observed.prescribed",
         params![
             dataset,
             source,
             game,
+            legacy_parent,
             direct,
             parent.learner,
             ply,
@@ -404,18 +406,22 @@ fn accepted_child(
         },
     )?;
     Ok(children.into_iter().any(|(id, child)| {
-        if child.repertoires.is_empty() || child.backfill_id != parent.backfill_id {
+        if child.backfill_id != parent.backfill_id {
             return false;
         }
-        let expected = direct.clone().unwrap_or_else(|| {
-            let wrapped = comparison_hash(serde_json::json!([
-                "game-relevance",
-                parent_id,
-                child.repertoires,
-                child.backfill_id,
-            ]));
-            selected_id(&wrapped)
-        });
-        id == expected
+        let legacy_child = child.repertoires.is_empty();
+        if legacy_parent == legacy_child {
+            return id == direct;
+        }
+        if !legacy_parent {
+            return false;
+        }
+        let wrapped = comparison_hash(serde_json::json!([
+            "game-relevance",
+            parent_id,
+            child.repertoires,
+            child.backfill_id,
+        ]));
+        id == selected_id(&wrapped)
     }))
 }
