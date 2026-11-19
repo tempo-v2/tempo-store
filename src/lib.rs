@@ -52,8 +52,9 @@ pub use game_model::{
 mod game_evidence;
 pub use game_evidence::{
     AcceptedGameChoice, AcceptedGames, ChoiceAttribution, ComparedGame, ComparedRelevance,
-    EncounterKey, EncounterRepair, GameChoice, GameChoiceTarget, GameChoices, GameCommit,
-    GameEncounters, GameFailureKey, GameHistory, GameHistoryEntry, GameObservation, GameReceipt,
-    GameRecord, GameSummary, GameTargetRelevance, GroupedOpponentGap, LegacyGameMiss, PgnTiming,
-    PortableChoiceFormat, PortableGameEvidence, RepertoireDisagreement, ResolvedGameChoice,
+    CorrectionGame, CorrectionGameLookup, EncounterKey, EncounterRepair, GameChoice,
+    GameChoiceTarget, GameChoices, GameCommit, GameEncounters, GameFailureKey, GameHistory,
+    GameHistoryEntry, GameObservation, GameReceipt, GameRecord, GameSummary, GameTargetRelevance,
+    GroupedOpponentGap, LegacyGameMiss, PgnTiming, PortableChoiceFormat, PortableGameEvidence,
+    RepertoireDisagreement, ResolvedGameChoice,
 };

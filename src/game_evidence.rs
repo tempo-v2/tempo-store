@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempo_chess::{OpponentGap, RepertoireAdherence};
-use tempo_types::{ContentVersion, Revision, TargetId};
+use tempo_types::{ContentVersion, DatasetId, MissRevision, Revision, TargetId};
 
 #[derive(Clone, Debug)]
 pub struct GameRecord {
@@ -59,6 +59,24 @@ impl GameRecord {
             end_ms: self.end_ms,
         })
     }
+}
+
+/// The issued identity and reset boundary of a guided repertoire repair.
+pub struct CorrectionGameLookup<'a> {
+    pub dataset: &'a DatasetId,
+    pub target: &'a TargetId,
+    pub version: ContentVersion,
+    pub miss_revision: MissRevision,
+    pub issued_at_ms: u64,
+    pub reset_at_ms: Option<u64>,
+    pub prescribed: &'a str,
+}
+
+/// Retained game and exact observed ply for the Game Again that issued a repair.
+pub struct CorrectionGame {
+    pub game: GameRecord,
+    pub ply: usize,
+    pub played: String,
 }
 
 #[derive(Clone, Debug)]
