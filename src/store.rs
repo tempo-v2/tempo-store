@@ -178,6 +178,15 @@ pub trait Store {
             .map(|entry| entry.item))
     }
 
+    /// Counts accepted reset commands independent of clock precision or ordering.
+    fn repertoire_reset_generation(
+        &self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+    ) -> Result<u64, StoreError> {
+        Ok(0)
+    }
+
     /// Save a game batch at the revision whose repertoire was compared.
     fn commit_games(
         &mut self,
@@ -244,6 +253,14 @@ pub trait Store {
         Ok(false)
     }
 
+    fn game_target_chosen(
+        &self,
+        _dataset: &DatasetId,
+        _key: &crate::GameFailureKey,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
     fn game_failed(
         &self,
         _dataset: &DatasetId,
@@ -287,6 +304,18 @@ pub trait Store {
         Err(invalid("this Store does not support game evidence"))
     }
 
+    fn historical_pgn_window(
+        &self,
+        _dataset: &DatasetId,
+        _learner: &str,
+        _from: u64,
+        _to: u64,
+    ) -> Result<Vec<crate::GameRecord>, StoreError> {
+        Err(invalid(
+            "this Store does not support historical PGN evidence",
+        ))
+    }
+
     /// Restore a new dataset and its acceptance boundaries in one transaction.
     fn restore_with_game_evidence(
         &mut self,
@@ -299,6 +328,70 @@ pub trait Store {
             ));
         }
         self.commit(commit)
+    }
+
+    fn game_relevance(
+        &self,
+        _dataset: &DatasetId,
+        _model: &str,
+    ) -> Result<std::collections::BTreeMap<TargetId, crate::GameTargetRelevance>, StoreError> {
+        Ok(Default::default())
+    }
+
+    fn game_content_revision(&self, _dataset: &DatasetId) -> Result<Option<Revision>, StoreError> {
+        Ok(None)
+    }
+
+    fn opponent_gaps(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn game_backfill_state(
+        &self,
+        _dataset: &DatasetId,
+        _id: Option<&str>,
+    ) -> Result<Option<String>, StoreError> {
+        Err(invalid("this Store does not support historical backfill"))
+    }
+
+    fn save_game_backfill_state(
+        &mut self,
+        _dataset: &DatasetId,
+        _id: &str,
+        _state: &str,
+        _accounts: Option<&[(String, String)]>,
+    ) -> Result<(), StoreError> {
+        Err(invalid("this Store does not support historical backfill"))
+    }
+
+    fn game_move_distribution(
+        &self,
+        _model: &str,
+        _position: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, f64>>, StoreError> {
+        Ok(None)
+    }
+
+    fn save_game_move_distribution(
+        &mut self,
+        _model: &str,
+        _position: &str,
+        _distribution: &std::collections::BTreeMap<String, f64>,
+    ) -> Result<(), StoreError> {
+        Err(invalid("this Store does not support model distributions"))
+    }
+
+    fn replace_game_model_reach(
+        &mut self,
+        _dataset: &DatasetId,
+        _model: &str,
+        _content_revision: Revision,
+        _reach: &std::collections::BTreeMap<TargetId, u32>,
+    ) -> Result<(), StoreError> {
+        Err(invalid("this Store does not support modeled reach"))
     }
 
     /// The recent answer-safe comparison records for the active dataset.

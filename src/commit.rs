@@ -81,6 +81,7 @@ mod tests {
             route: None,
             first_introduction: false,
             exercise_name: None,
+            relevance_reason: None,
             lesson: None,
             acceptance: None,
         };
