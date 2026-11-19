@@ -135,7 +135,8 @@ pub(super) fn books(
          LEFT JOIN game_model_projection AS result
            ON (result.dataset_id,result.repertoire_id,result.input_key)
             = (input.dataset_id,input.repertoire_id,input.input_key) AND result.model_key=?2
-         WHERE input.dataset_id=?1 AND input.state='verified' AND (?3 OR result.input_key IS NULL)
+         WHERE input.dataset_id=?1 AND input.state='verified'
+           AND (?3 OR result.input_key IS NULL OR result.complete=0)
          ORDER BY input.repertoire_id",
         params![
             dataset.0,
