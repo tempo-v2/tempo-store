@@ -18,6 +18,8 @@ pub enum StoreError {
     Unavailable(String),
     Conflict(String),
     Invalid(String),
+    /// The selected adapter does not implement this operation.
+    Unsupported(&'static str),
 }
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

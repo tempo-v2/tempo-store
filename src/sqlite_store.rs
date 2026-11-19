@@ -3,8 +3,9 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentReceipt, ContentSource, Receipt, ReceiptResult, RepertoireDocument,
-    RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope, Write,
+    Commit, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
+    RepertoireDocument, RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
+    StudyState, Write,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -731,7 +732,7 @@ impl Store for SqliteStore {
         Ok(snapshot)
     }
 
-    fn study_state(&self, scope: StudyScope<'_>) -> Result<Snapshot, StoreError> {
+    fn study_state(&self, scope: StudyScope<'_>) -> Result<StudyState, StoreError> {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
                 .map_err(database_error)?;
@@ -831,7 +832,7 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    fn content_state(&self) -> Result<(Snapshot, Revision), StoreError> {
+    fn content_state(&self) -> Result<ContentState, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(database_error)?;
         let state = load_study::load_study(
@@ -849,7 +850,7 @@ impl Store for SqliteStore {
             )
             .map_err(database_error)?;
         tx.commit().map_err(database_error)?;
-        Ok((state, Revision(revision)))
+        ContentState::from_study(state, Revision(revision))
     }
 
     fn commit_study(
@@ -868,7 +869,8 @@ impl Store for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        let previous = load_study::load_study(&transaction, scope)?;
+        let state = load_study::load_study(&transaction, scope)?;
+        let previous = load_study::staging_image(state);
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&transaction, Some(&previous), &next)?;
         transaction.commit().map_err(database_error)?;

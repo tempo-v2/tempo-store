@@ -433,7 +433,7 @@ impl SqliteStore {
                     .any(|entry| !entry.failures.is_empty() || entry.resolved_choice.is_some()),
             ..StudyScope::default()
         };
-        let previous = load_study::load_study(&transaction, scope)?;
+        let previous = load_study::staging_image(load_study::load_study(&transaction, scope)?);
         if let Some(accepted) = read_receipt(
             &transaction,
             &commit.expected_dataset,

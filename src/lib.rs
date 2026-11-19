@@ -58,3 +58,8 @@ pub use game_evidence::{
     GroupedOpponentGap, LegacyGameMiss, PgnTiming, PortableChoiceFormat, PortableGameEvidence,
     RepertoireDisagreement, ResolvedGameChoice,
 };
+
+mod content_state;
+mod study_state;
+pub use content_state::ContentState;
+pub use study_state::{StudyState, TargetCoverage};
