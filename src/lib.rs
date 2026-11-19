@@ -44,6 +44,11 @@ pub use store_error::StoreError;
 pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, StoredAttempt};
 pub use write::Write;
 
+mod game_model;
+pub use game_model::{
+    BookProjection, ModelAuthority, ModelInputStamp, ModelTargets, ProjectionBook, ProjectionScope,
+    ProjectionStatus, REACH_MODEL_KEY, model_lines, model_targets,
+};
 mod game_evidence;
 pub use game_evidence::{
     AcceptedGameChoice, AcceptedGames, ChoiceAttribution, ComparedGame, ComparedRelevance,

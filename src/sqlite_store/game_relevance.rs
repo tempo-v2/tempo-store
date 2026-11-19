@@ -243,19 +243,20 @@ pub(super) fn read(
     model: &str,
 ) -> Result<BTreeMap<TargetId, GameTargetRelevance>, StoreError> {
     let mut query = connection.prepare_cached(
-        "WITH ids AS (
+        "WITH modeled AS (
+           SELECT reach.target_id,reach.millionths FROM game_model_reach AS reach
+           JOIN game_model_inputs AS input USING(dataset_id,repertoire_id,input_key)
+           WHERE reach.dataset_id=?1 AND reach.model_key=?2 AND input.state='verified'
+         ), ids AS (
            SELECT target_id FROM game_target_relevance WHERE dataset_id=?1
-           UNION SELECT target_id FROM game_model_reach
-                 WHERE dataset_id=?1 AND model_key=?2
-                   AND content_revision=(SELECT content_revision FROM store_state WHERE singleton=1))
+           UNION SELECT target_id FROM modeled)
          SELECT ids.target_id,coalesce(exposure,0),
                 coalesce(json_extract(misses_by_version,'$.'||hex(current_content.version)),0),
                 coalesce(window_games,0),millionths
          FROM ids
          JOIN current_content ON current_content.target_id=ids.target_id AND current_content.dataset_id=?1
          LEFT JOIN game_target_relevance AS personal ON personal.target_id=ids.target_id AND personal.dataset_id=?1
-         LEFT JOIN game_model_reach AS model ON model.target_id=ids.target_id AND model.dataset_id=?1
-           AND model.model_key=?2 AND model.content_revision=(SELECT content_revision FROM store_state WHERE singleton=1)",
+         LEFT JOIN modeled ON modeled.target_id=ids.target_id",
     ).map_err(database_error)?;
     query
         .query_map(params![dataset.0, model], |row| {

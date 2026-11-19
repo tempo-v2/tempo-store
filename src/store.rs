@@ -29,6 +29,8 @@ pub enum ContentSource<'a> {
         id: &'a str,
         pgn: &'a str,
         repertoire_id: &'a str,
+        expected_content_revision: Revision,
+        model_input: &'a crate::ModelInputStamp,
     },
 }
 
@@ -39,6 +41,8 @@ pub struct RepertoireDocument {
     pub revision: Revision,
     pub item: Option<ContentItem>,
     pub pgn: Option<String>,
+    pub source_id: Option<String>,
+    pub model_authority: crate::ModelAuthority,
 }
 
 /// The same command may be delivered again without changing newer learning.
@@ -404,11 +408,34 @@ pub trait Store {
     fn replace_game_model_reach(
         &mut self,
         _dataset: &DatasetId,
-        _model: &str,
-        _content_revision: Revision,
-        _reach: &std::collections::BTreeMap<TargetId, u32>,
+        _projection: crate::BookProjection<'_>,
     ) -> Result<(), StoreError> {
         Err(invalid("this Store does not support modeled reach"))
+    }
+
+    fn game_model_projection_status(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
+        Ok(None)
+    }
+
+    fn model_bootstrap_repertoires(&self, _dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Accept one legacy source verification only while the original source is current.
+    fn finish_model_bootstrap(
+        &mut self,
+        _dataset: &DatasetId,
+        _content_revision: Revision,
+        _repertoire: &str,
+        _source_id: &str,
+        _stamp: Option<&crate::ModelInputStamp>,
+    ) -> Result<(), StoreError> {
+        Err(invalid(
+            "this Store does not support model source verification",
+        ))
     }
 
     /// The recent answer-safe comparison records for the active dataset.

@@ -42,3 +42,41 @@ CREATE VIEW game_choice_boundaries AS
         SELECT 1 FROM game_choice_resolutions AS native
         WHERE (native.dataset_id,native.source,native.game_id,native.position)
             = (restored.dataset_id,restored.source,restored.game_id,restored.position));
+
+CREATE TABLE game_model_inputs (
+    dataset_id TEXT NOT NULL,
+    repertoire_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    input_key TEXT,
+    CHECK ((state = 'verified' AND input_key IS NOT NULL)
+        OR (state IN ('needs_bootstrap','unavailable') AND input_key IS NULL)),
+    PRIMARY KEY (dataset_id, repertoire_id),
+    FOREIGN KEY (dataset_id, repertoire_id)
+        REFERENCES repertoire_documents(dataset_id, repertoire_id)
+) STRICT;
+INSERT INTO game_model_inputs (dataset_id, repertoire_id, state)
+SELECT dataset_id, repertoire_id, 'needs_bootstrap' FROM repertoire_documents;
+
+DROP TABLE game_model_reach;
+CREATE TABLE game_model_projection (
+    dataset_id TEXT NOT NULL,
+    repertoire_id TEXT NOT NULL,
+    model_key TEXT NOT NULL,
+    input_key TEXT NOT NULL,
+    complete INTEGER NOT NULL CHECK (complete IN (0,1)),
+    PRIMARY KEY (dataset_id, repertoire_id, model_key),
+    UNIQUE (dataset_id, repertoire_id, model_key, input_key),
+    FOREIGN KEY (dataset_id, repertoire_id) REFERENCES game_model_inputs(dataset_id, repertoire_id)
+) STRICT;
+CREATE TABLE game_model_reach (
+    dataset_id TEXT NOT NULL,
+    repertoire_id TEXT NOT NULL,
+    model_key TEXT NOT NULL,
+    input_key TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    millionths INTEGER NOT NULL CHECK (millionths BETWEEN 0 AND 1000000),
+    PRIMARY KEY (dataset_id, repertoire_id, model_key, target_id),
+    FOREIGN KEY (dataset_id, repertoire_id, model_key, input_key)
+        REFERENCES game_model_projection(dataset_id, repertoire_id, model_key, input_key)
+        ON DELETE CASCADE
+) STRICT;
