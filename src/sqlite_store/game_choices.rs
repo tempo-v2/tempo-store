@@ -292,42 +292,19 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<ChoiceMigrationReport, Sto
         }
         if let Some((comparison, ply)) = &native
             && let Some(parent) = &parent
-            // Schema 10's game-relevance wrapper carries per-book adherence.
-            // Older aliases lack this field and cannot establish the wrapped child ID.
-            && !parent.repertoires.is_empty()
-            && let Some(choice) = parent.choices.iter().find(|choice| choice.ply == *ply && choice.position == position)
+            && let Some(choice) = parent
+                .choices
+                .iter()
+                .find(|choice| choice.ply == *ply && choice.position == position)
         {
             for candidate in &choice.candidates {
                 let selected = ChoiceAttribution {
                     target: candidate.target_id.clone(),
                     answer_version: candidate.version,
                 };
-                let identity = serde_json::json!([comparison, ply, selected.target]);
-                let child = blake3::hash(identity.to_string().as_bytes())
-                    .to_hex()
-                    .to_string();
-                let observed: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM game_comparisons AS child
-                     JOIN game_observations AS observed
-                       ON (observed.dataset_id,observed.comparison_id)=(child.dataset_id,child.id)
-                     WHERE child.dataset_id=?1 AND child.source=?2 AND child.game_id=?3
-                       AND child.id=?4 AND json_extract(child.summary,'$.learner')=?5
-                       AND observed.ply=?6 AND observed.target_id=?7 AND observed.version=?8
-                       AND observed.played<>observed.prescribed)",
-                        params![
-                            dataset,
-                            source,
-                            game,
-                            child,
-                            parent.learner,
-                            ply,
-                            selected.target.0,
-                            selected.answer_version.0.to_be_bytes().as_slice()
-                        ],
-                        |row| row.get(0),
-                    )
-                    .map_err(database_error)?;
+                let observed = accepted_child(
+                    tx, &dataset, &source, &game, comparison, parent, *ply, &selected,
+                )?;
                 if observed {
                     if stored_item(tx, &dataset, &selected, true)?.is_some_and(|item| {
                         attribution_matches(&item, &position, selected.answer_version)
@@ -376,4 +353,69 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<ChoiceMigrationReport, Sto
         }
     }
     Ok(report)
+}
+
+fn comparison_hash(value: serde_json::Value) -> String {
+    blake3::hash(value.to_string().as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+// Schema 10 derived selected children from the wrapped parent even when the command used
+// its schema-9 alias. The child's retained adherence and backfill context reproduce that
+// wrapper exactly. The hash and exact historical observation must both match.
+fn accepted_child(
+    tx: &Transaction<'_>,
+    dataset: &str,
+    source: &str,
+    game: &str,
+    parent_id: &str,
+    parent: &GameSummary,
+    ply: usize,
+    selected: &ChoiceAttribution,
+) -> Result<bool, StoreError> {
+    let selected_id =
+        |wrapped: &str| comparison_hash(serde_json::json!([wrapped, ply, selected.target]));
+    let direct = (!parent.repertoires.is_empty()).then(|| selected_id(parent_id));
+    let children: Vec<(String, GameSummary)> = row_values::read_selected(
+        tx,
+        "SELECT child.id,child.summary FROM game_comparisons AS child
+         JOIN game_observations AS observed
+           ON (observed.dataset_id,observed.comparison_id)=(child.dataset_id,child.id)
+         WHERE child.dataset_id=?1 AND child.source=?2 AND child.game_id=?3
+           AND (?4 IS NULL OR child.id=?4) AND json_extract(child.summary,'$.learner')=?5
+           AND observed.ply=?6 AND observed.target_id=?7 AND observed.version=?8
+           AND observed.played<>observed.prescribed",
+        params![
+            dataset,
+            source,
+            game,
+            direct,
+            parent.learner,
+            ply,
+            selected.target.0,
+            selected.answer_version.0.to_be_bytes().as_slice()
+        ],
+        |row| {
+            Ok((
+                row.get(0).map_err(database_error)?,
+                row_values::text_value(row, 1)?,
+            ))
+        },
+    )?;
+    Ok(children.into_iter().any(|(id, child)| {
+        if child.repertoires.is_empty() || child.backfill_id != parent.backfill_id {
+            return false;
+        }
+        let expected = direct.clone().unwrap_or_else(|| {
+            let wrapped = comparison_hash(serde_json::json!([
+                "game-relevance",
+                parent_id,
+                child.repertoires,
+                child.backfill_id,
+            ]));
+            selected_id(&wrapped)
+        });
+        id == expected
+    }))
 }
