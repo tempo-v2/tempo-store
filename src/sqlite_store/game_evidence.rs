@@ -677,6 +677,70 @@ impl SqliteStore {
             .map_err(database_error)
     }
 
+    pub(super) fn read_game_library(
+        &self,
+        dataset: &DatasetId,
+        through: Option<i64>,
+        before: Option<i64>,
+    ) -> Result<crate::GameLibraryPage, StoreError> {
+        const PAGE: usize = 256;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(database_error)?;
+        let max_ordinal: i64 = tx
+            .query_row(
+                "SELECT coalesce((SELECT max(ordinal) FROM game_comparisons WHERE dataset_id=?1),0)
+             FROM store_state WHERE singleton=1 AND dataset_id=?1",
+                [&dataset.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| conflict("game library dataset changed"))?;
+        let through = through.unwrap_or(max_ordinal).min(max_ordinal);
+        let mut query = tx.prepare(
+            "WITH latest AS (
+                SELECT max(ordinal) AS ordinal FROM game_comparisons
+                WHERE dataset_id=?1 AND ordinal<=?2
+                GROUP BY source,game_id,json_extract(summary,'$.learner')
+                HAVING ?3 IS NULL OR max(ordinal)<?3
+                ORDER BY ordinal DESC LIMIT ?4
+             )
+             SELECT g.source,g.id,g.url,g.white,g.black,g.start_ms,g.end_ms,g.fetched_ms,g.pgn,
+                    coalesce(g.mainline_signature,''),g.played_date_ms,c.ordinal,json_extract(c.summary,'$.learner'),
+                    coalesce(json_extract(c.summary,'$.repertoires'),'[]')
+             FROM latest JOIN game_comparisons c USING(ordinal)
+             JOIN games g ON (g.dataset_id,g.source,g.id)=(c.dataset_id,c.source,c.game_id)
+             ORDER BY c.ordinal DESC"
+        ).map_err(database_error)?;
+        let rows = query
+            .query_map(params![dataset.0, through, before, PAGE + 1], |r| {
+                Ok((
+                    game_row(r)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                    r.get::<_, String>(13)?,
+                ))
+            })
+            .map_err(database_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (game, ordinal, learner, books) = row.map_err(database_error)?;
+            entries.push(crate::GameLibraryEntry {
+                game,
+                ordinal,
+                learner,
+                repertoires: row_values::decode(&books)?,
+            });
+        }
+        let next_before = (entries.len() > PAGE).then(|| entries[PAGE - 1].ordinal);
+        entries.truncate(PAGE);
+        Ok(crate::GameLibraryPage {
+            through,
+            entries,
+            next_before,
+        })
+    }
+
     pub(super) fn read_game_history(&self) -> Result<GameHistory, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(database_error)?;
@@ -841,6 +905,40 @@ mod tests {
             },
             observations: vec![],
         }
+    }
+
+    #[test]
+    fn archive_pages_keep_each_learners_latest_comparison_at_the_original_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset: DatasetId = "archive".into();
+        let db = SqliteStore::create(dir.path().join("archive.sqlite"), dataset.clone(),
+            tempo_chess::demo_catalog(), tempo_learning::DailyLearning::default().settings()).unwrap();
+        let add_comparison = |id: &str, receipt: String, learner: &str, books: &str| {
+            db.connection.execute("INSERT INTO game_comparisons(dataset_id,id,source,game_id,summary)
+                VALUES('archive',?1,'pgn',?2,json_object('learner',?3,'repertoires',json(?4)))",
+                params![receipt,id,learner,books]).unwrap();
+        };
+        for index in 0..257 {
+            let id = format!("game-{index}");
+            db.connection.execute("INSERT INTO games(dataset_id,source,id,white,black,fetched_ms,pgn)
+                VALUES('archive','pgn',?1,'White','Black',0,'1.e4 e5 1-0')", [&id]).unwrap();
+            add_comparison(&id, format!("first-{index}"), "white", "[]");
+        }
+        add_comparison("game-0", "second-learner".into(), "black", "[]");
+        let first = db.game_library(&dataset,None,None).unwrap();
+        assert_eq!(first.entries.len(),256);
+        assert_eq!(first.entries[0].learner, "black");
+        let book = r#"[{"repertoire_id":"italian","source_available":true,"first_departure":{"kind":"opponent_gap","ply":2},"reentry_ply":null}]"#;
+        add_comparison("game-0", "newer".into(), "white", book);
+        let tail = db.game_library(&dataset,Some(first.through),first.next_before).unwrap();
+        assert_eq!(tail.entries.len(),2);
+        assert_eq!(tail.next_before,None);
+        assert_eq!(tail.entries[1].game.id,"game-0");
+        assert!(tail.entries[1].repertoires.is_empty());
+        let newest = db.game_library(&dataset,None,None).unwrap();
+        assert_eq!(newest.entries[0].repertoires[0].repertoire_id,"italian");
+        assert_eq!(newest.entries[1].learner,"black");
+        assert!(db.game_library(&"foreign".into(),None,None).is_err());
     }
 
     #[test]

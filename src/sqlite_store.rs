@@ -712,6 +712,15 @@ impl Store for SqliteStore {
         )
     }
 
+    fn game_library(
+        &self,
+        dataset: &DatasetId,
+        through: Option<i64>,
+        before: Option<i64>,
+    ) -> Result<crate::GameLibraryPage, StoreError> {
+        self.read_game_library(dataset, through, before)
+    }
+
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
         self.read_game_history()
     }

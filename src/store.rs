@@ -438,6 +438,17 @@ pub trait Store {
         Err(StoreError::Unsupported("finish_model_bootstrap"))
     }
 
+    /// Page through the newest comparison for each game and learner at a fixed
+    /// import watermark. Older summaries can lack per-repertoire comparisons.
+    fn game_library(
+        &self,
+        _dataset: &DatasetId,
+        _through: Option<i64>,
+        _before: Option<i64>,
+    ) -> Result<crate::GameLibraryPage, StoreError> {
+        Err(StoreError::Unsupported("game_library"))
+    }
+
     /// The recent answer-safe comparison records for the active dataset.
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
         Err(StoreError::Unsupported("game_history"))

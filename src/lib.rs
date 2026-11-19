@@ -54,9 +54,9 @@ pub use game_evidence::{
     AcceptedGameChoice, AcceptedGames, ChoiceAttribution, ComparedGame, ComparedRelevance,
     CorrectionGame, CorrectionGameLookup, EncounterKey, EncounterRepair, GameChoice,
     GameChoiceTarget, GameChoices, GameCommit, GameEncounters, GameFailureKey, GameHistory,
-    GameHistoryEntry, GameObservation, GameReceipt, GameRecord, GameSummary, GameTargetRelevance,
-    GroupedOpponentGap, LegacyGameMiss, PgnTiming, PortableChoiceFormat, PortableGameEvidence,
-    RepertoireDisagreement, ResolvedGameChoice,
+    GameHistoryEntry, GameLibraryEntry, GameLibraryPage, GameObservation, GameReceipt, GameRecord,
+    GameSummary, GameTargetRelevance, GroupedOpponentGap, LegacyGameMiss, PgnTiming,
+    PortableChoiceFormat, PortableGameEvidence, RepertoireDisagreement, ResolvedGameChoice,
 };
 
 mod content_state;
