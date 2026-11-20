@@ -1096,7 +1096,7 @@ impl SqliteStore {
                (SELECT json_group_array(json_array(json_extract(value,'$.motif'),json_extract(value,'$.answer.uci')))
                 FROM json_each(details_json,'$.assessment.personal.candidates')),
                (SELECT json_group_array(json_extract(value,'$.uci'))
-                FROM json_each(details_json,'$.assessment.accepted_moves'))
+                FROM json_each(details_json,'$.assessment.accepted_moves')), o.learner
              FROM tactical_observations o
              JOIN latest l ON (l.source,l.game_id)=(o.source,o.game_id)
              JOIN game_comparisons c ON c.ordinal=l.ordinal
@@ -1113,6 +1113,7 @@ impl SqliteStore {
             let outcome: String = row.get(5).map_err(database_error)?;
             decisions.push(TacticalDecisionRow {
                 id: row.get(0).map_err(database_error)?,
+                learner: row.get(8).map_err(database_error)?,
                 source: row.get(1).map_err(database_error)?,
                 game_id: row.get(2).map_err(database_error)?,
                 ply: row.get(3).map_err(database_error)?,

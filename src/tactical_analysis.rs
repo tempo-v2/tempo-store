@@ -183,6 +183,7 @@ pub struct TacticalArchiveGame {
 /// Small report input. Full engine evidence is loaded only for displayed positions.
 pub struct TacticalDecisionRow {
     pub id: u64,
+    pub learner: String,
     pub source: String,
     pub game_id: String,
     pub ply: u32,
