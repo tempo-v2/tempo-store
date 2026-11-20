@@ -78,6 +78,9 @@ pub struct StoredAttempt {
     pub relevance_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lesson: Option<tempo_chess::RepertoireLesson>,
+    /// The presentation context available when Study issued this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opponent_lead_in: Option<tempo_chess::OpponentLeadIn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<ActivityAcceptance>,
     /// Set by Tempo from the accepted Study transition, independent of the first grade.

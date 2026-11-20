@@ -84,6 +84,7 @@ mod tests {
             exercise_name: None,
             relevance_reason: None,
             lesson: None,
+            opponent_lead_in: None,
             acceptance: None,
             revealed_decision: None,
         };

@@ -10,8 +10,8 @@ use crate::{
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
-use std::{path::Path, time::Duration};
-use tempo_chess::{Catalog, ContentItem};
+use std::{collections::BTreeMap, path::Path, time::Duration};
+use tempo_chess::{Catalog, ContentItem, LeadInEvidence};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
@@ -172,6 +172,79 @@ impl SqliteStore {
         rows.collect::<Result<_, _>>().map_err(database_error)
     }
 
+    /// Read one archived PGN referenced by a current content source.
+    pub fn archived_content_pgn(&self, id: &str) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row("SELECT pgn FROM content_sources WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(database_error)
+    }
+
+    /// Backfill verified presentation metadata against the exact catalog read.
+    /// Authored content, issued versions, learning and receipts are independent.
+    pub fn backfill_opponent_lead_ins(
+        &mut self,
+        dataset: &DatasetId,
+        expected: Revision,
+        evidence: &BTreeMap<TargetId, LeadInEvidence>,
+    ) -> Result<(), StoreError> {
+        if evidence.is_empty() {
+            return Ok(());
+        }
+        if evidence.values().any(LeadInEvidence::is_unavailable) {
+            return Err(invalid("expected resolved lead-in evidence"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let revision = expected
+            .0
+            .checked_add(1)
+            .ok_or_else(|| invalid("store revision exhausted"))?;
+        let changed = tx.execute(
+            "UPDATE store_state SET revision=?1 WHERE singleton=1 AND dataset_id=?2 AND revision=?3",
+            params![revision.to_be_bytes().as_slice(), dataset.0, expected.0.to_be_bytes().as_slice()],
+        ).map_err(database_error)?;
+        if changed != 1 {
+            return Err(conflict("snapshot changed; reload before retrying"));
+        }
+        {
+            let mut read = tx.prepare_cached(
+                "SELECT item -> '$.opponent_lead_in' FROM current_content WHERE dataset_id=?1 AND target_id=?2",
+            ).map_err(database_error)?;
+            let mut update = tx
+                .prepare_cached(
+                    "UPDATE current_content SET item=json_set(item,'$.opponent_lead_in',json(?1))
+                 WHERE dataset_id=?2 AND target_id=?3",
+                )
+                .map_err(database_error)?;
+            for (target, context) in evidence {
+                let raw: Option<String> = read
+                    .query_row(params![dataset.0, target.0], |row| row.get(0))
+                    .optional()
+                    .map_err(database_error)?
+                    .ok_or_else(|| conflict("setup target changed; reload before retrying"))?;
+                let previous: LeadInEvidence = raw
+                    .as_deref()
+                    .map(row_values::decode)
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut resolved = previous.clone();
+                resolved.reconcile(context);
+                if resolved == previous || resolved != *context {
+                    return Err(conflict("setup context changed; reload before retrying"));
+                }
+                update
+                    .execute(params![row_values::encode(context)?, dataset.0, target.0])
+                    .map_err(database_error)?;
+            }
+        }
+        tx.commit().map_err(database_error)
+    }
+
     /// Read the local application's persisted settings representation.
     pub fn local_profile(&self) -> Result<Option<String>, StoreError> {
         self.connection
@@ -204,6 +277,27 @@ impl SqliteStore {
         dataset: &DatasetId,
     ) -> Result<std::collections::BTreeSet<String>, StoreError> {
         repertoire_suspensions::read(&self.connection, &dataset.0)
+    }
+
+    /// Inspect the current schema without creating or migrating a database.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let connection = Connection::open_with_flags(
+            file_path(path.as_ref())?,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(database_error)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(database_error)?;
+        if schema_version(&connection)? != SCHEMA_VERSION {
+            return Err(invalid(
+                "read-only inspection requires the current Store schema",
+            ));
+        }
+        Ok(Self {
+            connection,
+            choice_migration: None,
+        })
     }
 
     /// Open an existing database using the current schema. A missing file is an error.

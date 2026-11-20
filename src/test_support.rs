@@ -44,6 +44,7 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
         exercise_name: None,
         relevance_reason: None,
         lesson: None,
+        opponent_lead_in: None,
         acceptance: None,
         revealed_decision: None,
     }

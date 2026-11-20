@@ -72,6 +72,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.exercise_name != previous.exercise_name
                 || record.relevance_reason != previous.relevance_reason
                 || record.lesson != previous.lesson
+                || record.opponent_lead_in != previous.opponent_lead_in
                 || (previous.acceptance.is_some() && record.acceptance != previous.acceptance)
                 || (record.mode.guided() && next.terminal.is_some())
                 || old.status != AttemptStatus::Active
