@@ -63,3 +63,10 @@ mod content_state;
 mod study_state;
 pub use content_state::ContentState;
 pub use study_state::{StudyState, TargetCoverage};
+
+mod tactical_analysis;
+pub use tactical_analysis::{
+    StoredTacticalObservation, TacticalAcceptance, TacticalAnalysis, TacticalAnalysisStatus,
+    TacticalGame, TacticalGameCursor, TacticalObservation, TacticalObservationPage,
+    TacticalPuzzleRef, TacticalRequest, TacticalStatistics,
+};

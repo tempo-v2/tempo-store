@@ -90,7 +90,11 @@ pub(super) fn save_snapshot(
         )
         .map_err(database_error)?;
 
-    save_outcomes(transaction, previous, next)
+    save_outcomes(transaction, previous, next)?;
+    if let Some(previous) = previous {
+        super::tactical_analysis::settle_attempts(transaction, previous, next)?;
+    }
+    Ok(())
 }
 
 fn save_history(

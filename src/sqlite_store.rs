@@ -24,13 +24,15 @@ mod load_study;
 mod repertoire_resets;
 mod row_values;
 mod save_snapshot;
+mod tactical_analysis;
 
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
 
 pub use game_choices::ChoiceMigrationReport;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
+const TACTICAL_ANALYSIS_SCHEMA: &str = include_str!("sqlite_store/tactical_analysis.sql");
 const CORRECTIVE_RELEASE_SCHEMA: &str = include_str!("sqlite_store/corrective_release.sql");
 const GAME_RELEVANCE_SCHEMA: &str = include_str!("sqlite_store/game_relevance.sql");
 const PORTABLE_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/portable_evidence.sql");
@@ -134,6 +136,9 @@ impl SqliteStore {
             .execute_batch(CORRECTIVE_RELEASE_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(TACTICAL_ANALYSIS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -195,7 +200,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=10) {
+        if matches!(schema_version(&connection)?, 2..=11) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -251,6 +256,12 @@ impl SqliteStore {
                 tx.execute_batch(CORRECTIVE_RELEASE_SCHEMA)
                     .map_err(database_error)?;
                 choice_migration = Some(game_choices::migrate(&tx)?);
+                tx.pragma_update(None, "user_version", 11)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 11 {
+                tx.execute_batch(TACTICAL_ANALYSIS_SCHEMA)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -299,6 +310,62 @@ impl SqliteStore {
 mod tactic_page;
 
 impl Store for SqliteStore {
+    fn commit_tactical_analysis(
+        &mut self,
+        commit: Commit,
+        analysis: &crate::TacticalAnalysis,
+    ) -> Result<crate::TacticalAcceptance, StoreError> {
+        tactical_analysis::accept(&mut self.connection, commit, analysis)
+    }
+    fn pending_tactical_analyses(
+        &self,
+        dataset: &DatasetId,
+        detector: &str,
+        version: &str,
+        after: Option<&crate::TacticalGameCursor>,
+        limit: usize,
+    ) -> Result<Vec<crate::TacticalGame>, StoreError> {
+        tactical_analysis::pending_games(&self.connection, dataset, detector, version, after, limit)
+    }
+    fn pending_tactical_requests(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Vec<crate::TacticalRequest>, StoreError> {
+        tactical_analysis::pending_requests(&self.connection, dataset)
+    }
+    fn has_pending_tactical_request_for_attempt(
+        &self,
+        dataset: &DatasetId,
+        attempt: &AttemptId,
+    ) -> Result<bool, StoreError> {
+        tactical_analysis::has_pending_request_for_attempt(&self.connection, dataset, attempt)
+    }
+    fn commit_immediate_recall(
+        &mut self,
+        commit: Commit,
+        scope: StudyScope<'_>,
+        request_id: u64,
+    ) -> Result<Revision, StoreError> {
+        tactical_analysis::issue(&mut self.connection, commit, scope, request_id)
+    }
+    fn tactical_statistics(
+        &self,
+        dataset: &DatasetId,
+        detector: &str,
+        version: &str,
+    ) -> Result<crate::TacticalStatistics, StoreError> {
+        tactical_analysis::statistics(&self.connection, dataset, detector, version)
+    }
+    fn tactical_observations(
+        &self,
+        dataset: &DatasetId,
+        detector: &str,
+        version: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<crate::TacticalObservationPage, StoreError> {
+        tactical_analysis::observations(&self.connection, dataset, detector, version, before, limit)
+    }
     fn reset_repertoire(
         &mut self,
         dataset: &DatasetId,
@@ -932,11 +999,18 @@ impl Store for SqliteStore {
         repertoire: &str,
         positions: &[tempo_chess::PositionKey],
     ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
-        let tx = self.connection.unchecked_transaction().map_err(database_error)?;
-        let current: Option<u64> = tx.query_row(
-            "SELECT content_revision FROM store_state WHERE singleton=1 AND dataset_id=?1",
-            [&dataset.0], |row| row.get(0)
-        ).optional().map_err(database_error)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(database_error)?;
+        let current: Option<u64> = tx
+            .query_row(
+                "SELECT content_revision FROM store_state WHERE singleton=1 AND dataset_id=?1",
+                [&dataset.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
         if current != Some(revision.0) {
             return Err(conflict("The repertoire changed while reading the game."));
         }

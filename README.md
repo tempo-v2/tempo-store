@@ -152,4 +152,39 @@ cargo clippy -p tempo-store --all-targets -- -D warnings
 
 The SQLite scenarios check version-1 initialization, unsupported schema versions,
 foreign keys, uniqueness, simultaneous writers, reopen, and rollback after a late
-SQL failure. Schema migration and power-loss qualification remain future work.
+SQL failure. Schema 11 → 12 migration is additive and covered by rollback/reopen tests; those checks do not establish power-loss qualification.
+
+
+## Immediate tactical recall
+
+A tactical scan supplies evidence; the application decides whether its observation
+requests training. `commit_tactical_analysis` accepts ordinary catalog/Learning
+writes, the observations, a complete or failed analysis marker, and all new recall
+requests in one SQLite transaction. Store never turns an outcome label into a
+training decision: only the explicit `TacticalObservation::train` command does so.
+
+| Decision | Contract and owner |
+| --- | --- |
+| Count a real opportunity once | Store's unique dataset/source/game/learner/detector/ply/motif key excludes detector revision. |
+| Reuse a puzzle | Chess supplies the target and content version; existing Learning remains authoritative. |
+| New miss becomes next work | Each distinct requested occurrence receives one durable request; Queue owns priority. |
+| Preserve the active exercise | Analysis accepts only catalog/Learning writes; it cannot change the active pointer. |
+| Scheduled Test or required Practice | Learning projects the existing daily cadence; Store persists the issued mode. |
+| Complete exactly the issued request | `commit_immediate_recall` binds one request to one new attempt. `commit_study` fulfills that request with completion, or releases it on abandonment. |
+| Retry without repeating effects | An analysis-version marker retains the accepted result; replay performs no writes and returns no new deferral-clearing targets. |
+
+A later miss creates a different request even if its puzzle is identical. An older
+attempt cannot fulfill it. Failed, timed-out and unsupported scans are recorded
+without training; completed scans with no findings are recorded too. Pending scans
+use newest-first keyset pages over accepted game/learner identities, including
+undated games. A result for the same game fingerprint/version suppresses another
+automatic scan. A changed detector version can reassess evidence without recreating
+a fulfilled request. Complete revised evidence can retract an unissued request;
+it does not replace a displayed attempt.
+
+The tactical tables are independent of `Snapshot`: ordinary Study reads retain
+their bounded scope. The schema-12 migration adds three tables with relational
+uniqueness and foreign keys. It leaves existing content, Learning, attempts and
+receipts intact. MemoryStore explicitly has no tactical requests because it cannot
+accept tactical analyses. Production callers must not hide an unsupported Store
+capability as an empty result.
