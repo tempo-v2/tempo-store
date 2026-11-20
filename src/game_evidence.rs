@@ -278,8 +278,9 @@ pub struct GameLibraryPage {
     pub next_before: Option<i64>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct GameHistory {
+    pub dataset: DatasetId,
     pub results: Vec<GameHistoryEntry>,
     pub last_successful_refresh_ms: Option<u64>,
 }
@@ -297,13 +298,20 @@ pub struct AcceptedGames {
     pub report: String,
 }
 
+/// Authored content and eligible repertoire participation observed together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GameComparisonBasis {
+    pub content: Revision,
+    pub participation: Revision,
+}
+
 /// One analyzed game supplies position encounters and current answer comparisons.
 #[derive(Clone, Debug, Default)]
 pub struct ComparedRelevance {
     pub encounters: GameEncounters,
     pub gaps: BTreeMap<OpponentGap, String>,
     pub prior_choices: GameChoices,
-    pub content_revision: Revision,
+    pub basis: GameComparisonBasis,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

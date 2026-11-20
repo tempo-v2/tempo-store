@@ -112,6 +112,7 @@ pub(super) fn load_study(
         TargetCoverage::Selected(targets.into_iter().map(|id| TargetId(id.clone())).collect())
     };
     Ok(StudyState {
+        suspended_repertoires: super::repertoire_suspensions::read(tx, &dataset)?,
         dataset: DatasetId(dataset),
         revision: Revision(decode_counter(revision)?),
         active_attempt: active.map(AttemptId),

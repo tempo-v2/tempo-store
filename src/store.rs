@@ -37,6 +37,7 @@ pub enum ContentSource<'a> {
 /// A bounded, consistent read of the active dataset and selected repertoire.
 /// An existing repertoire can lack an authoritative PGN association.
 pub struct RepertoireDocument {
+    pub suspended: bool,
     pub dataset: DatasetId,
     pub revision: Revision,
     pub item: Option<ContentItem>,
@@ -157,6 +158,25 @@ pub trait Store {
         _positions: &[tempo_chess::PositionKey],
     ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
         Err(StoreError::Unsupported("repertoire_introductions"))
+    }
+
+    /// Read a prior receipt or the current addressed attempt and write revision.
+    fn repertoire_activity(
+        &self,
+        _command: &crate::RepertoireActivityCommand<'_>,
+    ) -> Result<crate::RepertoireActivityRead, StoreError> {
+        Err(StoreError::Unsupported("repertoire_activity"))
+    }
+
+    /// Save participation and any supplied Study abandonment in the same transaction.
+    /// A matching prior receipt settles the command before checking the write revision.
+    fn set_repertoire_activity(
+        &mut self,
+        _command: &crate::RepertoireActivityCommand<'_>,
+        _expected_revision: Revision,
+        _abandoned: Option<crate::ChessAttempt>,
+    ) -> Result<crate::RepertoireActivityResult, StoreError> {
+        Err(StoreError::Unsupported("set_repertoire_activity"))
     }
 
     /// Clear one repertoire's Study records and publish its reset receipt atomically.
@@ -308,7 +328,7 @@ pub trait Store {
     fn repair_choice_encounters(
         &mut self,
         _dataset: &DatasetId,
-        _content_revision: Revision,
+        _basis: crate::GameComparisonBasis,
         _repairs: &[crate::EncounterRepair],
     ) -> Result<usize, StoreError> {
         Err(StoreError::Unsupported("repair_choice_encounters"))
@@ -392,8 +412,12 @@ pub trait Store {
         Err(StoreError::Unsupported("game_relevance"))
     }
 
-    fn game_content_revision(&self, _dataset: &DatasetId) -> Result<Option<Revision>, StoreError> {
-        Err(StoreError::Unsupported("game_content_revision"))
+    /// The current basis for cached Games comparisons, fenced to the dataset.
+    fn game_comparison_basis(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Option<crate::GameComparisonBasis>, StoreError> {
+        Err(StoreError::Unsupported("game_comparison_basis"))
     }
 
     fn opponent_gaps(

@@ -153,6 +153,71 @@ fn repertoire_reset_rolls_back_scoped_deletions_when_its_receipt_fails() {
 }
 
 #[test]
+fn repertoire_activity_is_atomic_and_an_old_receipt_cannot_resuspend_it() {
+    use crate::{
+        RepertoireActivity, RepertoireActivityCommand, RepertoireActivityRead,
+        RepertoireActivityResult,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create(&dir.path().join("suspension.sqlite"), demo_catalog());
+    let issued = issue(&mut store);
+    store
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER reject_activity_receipt BEFORE INSERT ON content_receipts
+         BEGIN SELECT RAISE(ABORT, 'injected activity receipt failure'); END;",
+        )
+        .unwrap();
+    let change = |store: &mut SqliteStore, id, activity| {
+        let command = RepertoireActivityCommand {
+            dataset: &issued.dataset,
+            repertoire: "r1",
+            command_id: id,
+            activity,
+        };
+        let read = store.repertoire_activity(&command)?;
+        let RepertoireActivityRead::Pending { revision, active } = read else {
+            return store.set_repertoire_activity(&command, Revision(0), None);
+        };
+        let abandonment = active
+            .filter(|_| activity == RepertoireActivity::Suspended)
+            .map(|attempt| tempo_study::abandon(&attempt, attempt.revision).unwrap());
+        store.set_repertoire_activity(&command, revision, abandonment)
+    };
+    assert!(change(&mut store, "pause", RepertoireActivity::Suspended).is_err());
+    assert_eq!(store.snapshot().unwrap(), issued);
+    assert_eq!(store.content_state().unwrap().content_revision, Revision(0));
+    assert!(!store.repertoire_document("r1").unwrap().suspended);
+
+    store
+        .connection
+        .execute_batch("DROP TRIGGER reject_activity_receipt")
+        .unwrap();
+    assert!(matches!(
+        change(&mut store, "pause", RepertoireActivity::Suspended).unwrap(),
+        RepertoireActivityResult::Applied
+    ));
+    assert!(matches!(
+        change(&mut store, "pause", RepertoireActivity::Active).unwrap(),
+        RepertoireActivityResult::CommandConflict
+    ));
+    assert!(matches!(
+        change(&mut store, "resume", RepertoireActivity::Active).unwrap(),
+        RepertoireActivityResult::Applied
+    ));
+    assert!(matches!(
+        change(&mut store, "pause", RepertoireActivity::Suspended).unwrap(),
+        RepertoireActivityResult::Applied
+    ));
+    assert!(!store.repertoire_document("r1").unwrap().suspended);
+    assert!(matches!(
+        commit(&mut store, &issued, successful_answer_writes(&issued)),
+        Err(StoreError::Conflict(_))
+    ));
+}
+
+#[test]
 fn receipt_trigger_aborts_late_writes_and_the_same_batch_can_retry_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");
@@ -394,7 +459,7 @@ fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
         key: "fixture-model-input".into(),
         targets: crate::model_targets(&catalog, repertoire),
     };
-    let content_revision = store.model_content_marker().unwrap().1;
+    let content_revision = store.game_comparison_marker().unwrap().1.content;
     let save = |store: &mut SqliteStore| {
         store.commit_content(
             commit.clone(),

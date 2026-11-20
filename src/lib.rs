@@ -17,6 +17,7 @@ mod saved_review;
 pub use saved_review::{
     ReviewCommandKey, ReviewPosition, ReviewWrite, SavedReview, SavedReviewContext,
 };
+mod repertoire_activity;
 mod snapshot;
 mod sqlite_store;
 mod store;
@@ -39,13 +40,18 @@ pub use content_history::ContentHistory;
 pub use memory_store::MemoryStore;
 pub use receipt::Receipt;
 pub use receipt_result::ReceiptResult;
+pub use repertoire_activity::{
+    RepertoireActivity, RepertoireActivityCommand, RepertoireActivityRead, RepertoireActivityResult,
+};
 pub use snapshot::Snapshot;
 pub use sqlite_store::SqliteStore;
 pub use store::{
     ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyScope,
 };
 pub use store_error::StoreError;
-pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, RevealedDecision, StoredAttempt};
+pub use stored_attempt::{
+    AcceptanceKind, ActivityAcceptance, ActivityMode, RevealedDecision, StoredAttempt,
+};
 pub use write::Write;
 
 mod game_model;
@@ -57,9 +63,9 @@ mod game_evidence;
 pub use game_evidence::{
     AcceptedGameChoice, AcceptedGames, ChoiceAttribution, ComparedGame, ComparedRelevance,
     CorrectionGame, CorrectionGameLookup, EncounterKey, EncounterRepair, GameChoice,
-    GameChoiceTarget, GameChoices, GameCommit, GameEncounters, GameFailureKey, GameHistory,
-    GameHistoryEntry, GameLibraryEntry, GameLibraryPage, GameObservation, GameReceipt, GameRecord,
-    GameSummary, GameTargetRelevance, GroupedOpponentGap, LegacyGameMiss, PgnTiming,
+    GameChoiceTarget, GameChoices, GameCommit, GameComparisonBasis, GameEncounters, GameFailureKey,
+    GameHistory, GameHistoryEntry, GameLibraryEntry, GameLibraryPage, GameObservation, GameReceipt,
+    GameRecord, GameSummary, GameTargetRelevance, GroupedOpponentGap, LegacyGameMiss, PgnTiming,
     PortableChoiceFormat, PortableGameEvidence, RepertoireDisagreement, ResolvedGameChoice,
 };
 

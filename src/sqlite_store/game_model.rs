@@ -77,7 +77,9 @@ pub(super) fn bootstrap_repertoires(
 ) -> Result<Vec<String>, StoreError> {
     row_values::read_selected(
         db,
-        "SELECT repertoire_id FROM game_model_inputs WHERE dataset_id=?1 AND state='needs_bootstrap'
+        "SELECT repertoire_id FROM game_model_inputs AS input WHERE dataset_id=?1 AND state='needs_bootstrap'
+           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
+               WHERE (suspended.dataset_id,suspended.repertoire_id)=(input.dataset_id,input.repertoire_id))
          ORDER BY repertoire_id",
         [&dataset.0],
         |row| row.get(0).map_err(database_error),
@@ -136,6 +138,8 @@ pub(super) fn books(
            ON (result.dataset_id,result.repertoire_id,result.input_key)
             = (input.dataset_id,input.repertoire_id,input.input_key) AND result.model_key=?2
          WHERE input.dataset_id=?1 AND input.state='verified'
+           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
+               WHERE (suspended.dataset_id,suspended.repertoire_id)=(input.dataset_id,input.repertoire_id))
            AND (?3 OR result.input_key IS NULL OR result.complete=0)
          ORDER BY input.repertoire_id",
         params![
@@ -184,7 +188,9 @@ pub(super) fn status(db: &Connection, dataset: &DatasetId) -> Result<ProjectionS
            ON input.dataset_id=?1 AND input.repertoire_id=active_books.repertoire_id
          LEFT JOIN game_model_projection AS result
            ON (result.dataset_id,result.repertoire_id,result.input_key)
-              = (input.dataset_id,input.repertoire_id,input.input_key) AND result.model_key=?2",
+              = (input.dataset_id,input.repertoire_id,input.input_key) AND result.model_key=?2
+         WHERE NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
+             WHERE suspended.dataset_id=?1 AND suspended.repertoire_id=active_books.repertoire_id)",
         params![dataset.0, REACH_MODEL_KEY],
         |row| Ok(ProjectionStatus {
             dataset_id: dataset.clone(), complete_current: row.get(0)?,
@@ -208,7 +214,8 @@ pub(super) fn replace(
     let current: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM game_model_inputs WHERE dataset_id=?1 AND repertoire_id=?2
-           AND state='verified' AND input_key=?3)",
+           AND state='verified' AND input_key=?3
+           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions WHERE dataset_id=?1 AND repertoire_id=?2))",
             params![dataset.0, projection.repertoire_id, projection.input_key],
             |row| row.get(0),
         )

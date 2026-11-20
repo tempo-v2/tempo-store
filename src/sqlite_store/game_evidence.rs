@@ -456,7 +456,7 @@ impl SqliteStore {
         for entry in games {
             let game = &entry.game;
             if let Some(evidence) = &entry.relevance {
-                game_relevance::check_content_revision(&transaction, evidence.content_revision)?;
+                game_relevance::check_comparison_basis(&transaction, evidence.basis)?;
                 game_choices::ensure_current(
                     &transaction,
                     &previous.dataset,
@@ -744,6 +744,13 @@ impl SqliteStore {
     pub(super) fn read_game_history(&self) -> Result<GameHistory, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(database_error)?;
+        let dataset = tx
+            .query_row(
+                "SELECT dataset_id FROM store_state WHERE singleton=1",
+                [],
+                |row| row.get(0).map(DatasetId),
+            )
+            .map_err(database_error)?;
         let results = {
             let mut statement = tx
                 .prepare(
@@ -809,6 +816,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         tx.commit().map_err(database_error)?;
         Ok(GameHistory {
+            dataset,
             results,
             last_successful_refresh_ms,
         })
@@ -1094,7 +1102,7 @@ mod tests {
         )
         .unwrap();
         let before = store.snapshot().unwrap();
-        let content_revision = store.model_content_marker().unwrap().1;
+        let basis = store.game_comparison_marker().unwrap().1;
         let commit = || Commit {
             expected_revision: before.revision,
             expected_dataset: dataset.clone(),
@@ -1126,7 +1134,7 @@ mod tests {
             });
         }
         parent.relevance = Some(ComparedRelevance {
-            content_revision,
+            basis,
             ..ComparedRelevance::default()
         });
         store
@@ -1157,7 +1165,7 @@ mod tests {
             child.relevance = Some(ComparedRelevance {
                 encounters,
                 prior_choices,
-                content_revision,
+                basis,
                 ..ComparedRelevance::default()
             });
             child
@@ -1229,7 +1237,7 @@ mod tests {
             "no-grade choices preserve the Study revision and state"
         );
         assert!(matches!(
-            reader.repair_choice_encounters(&dataset, content_revision, &[stale_repair]),
+            reader.repair_choice_encounters(&dataset, basis, &[stale_repair]),
             Err(StoreError::Conflict(_))
         ));
         let mut stale = parent;

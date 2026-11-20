@@ -2,8 +2,8 @@
 use super::{database_error, game_choices, row_values};
 use crate::store_error::conflict;
 use crate::{
-    ComparedGame, ComparedRelevance, EncounterKey, EncounterRepair, GameEncounters,
-    GameTargetRelevance, GroupedOpponentGap, StoreError,
+    ComparedGame, ComparedRelevance, EncounterKey, EncounterRepair, GameComparisonBasis,
+    GameEncounters, GameTargetRelevance, GroupedOpponentGap, StoreError,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::collections::BTreeMap;
@@ -41,7 +41,10 @@ pub(super) fn save_facts(
         )?;
     }
     tx.execute(
-        "DELETE FROM game_opponent_gaps WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND learner=?4",
+        "DELETE FROM game_opponent_gaps AS gap
+         WHERE (dataset_id,source,game_id,learner)=(?1,?2,?3,?4)
+           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
+               WHERE (suspended.dataset_id,suspended.repertoire_id)=(gap.dataset_id,gap.repertoire_id))",
         params![dataset, game.source, game.id, learner],
     ).map_err(database_error)?;
     let mut statement = tx
@@ -73,9 +76,15 @@ fn replace_encounters(
     encounters: &GameEncounters,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "DELETE FROM game_encounters WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND learner=?4",
+        "DELETE FROM game_encounters AS encounter
+         WHERE (dataset_id,source,game_id,learner)=(?1,?2,?3,?4)
+           AND NOT EXISTS (SELECT 1 FROM current_content AS item
+               JOIN repertoire_suspensions AS suspended
+                 ON (suspended.dataset_id,suspended.repertoire_id)=(item.dataset_id,item.repertoire)
+               WHERE (item.dataset_id,item.target_id)=(encounter.dataset_id,encounter.target_id))",
         params![dataset, source, game, learner],
-    ).map_err(database_error)?;
+    )
+    .map_err(database_error)?;
     let mut statement = tx
         .prepare_cached("INSERT INTO game_encounters VALUES (?1,?2,?3,?4,?5,?6,?7)")
         .map_err(database_error)?;
@@ -144,17 +153,44 @@ pub(super) fn check_content_revision(
     Ok(())
 }
 
+pub(super) fn comparison_marker(
+    db: &Connection,
+) -> Result<(DatasetId, GameComparisonBasis), StoreError> {
+    db.query_row(
+        "SELECT state.dataset_id,state.content_revision,coalesce(participation.revision,0)
+         FROM store_state AS state LEFT JOIN game_participation_revisions AS participation USING(dataset_id)
+         WHERE state.singleton=1",
+        [],
+        |row| Ok((DatasetId(row.get(0)?), GameComparisonBasis {
+            content: Revision(row.get(1)?),
+            participation: Revision(row.get(2)?),
+        })),
+    ).map_err(database_error)
+}
+
+pub(super) fn check_comparison_basis(
+    db: &Connection,
+    expected: GameComparisonBasis,
+) -> Result<(), StoreError> {
+    if comparison_marker(db)?.1 != expected {
+        return Err(conflict(
+            "authoring or participation changed during game comparison",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn repair_choice_encounters(
     db: &mut Connection,
     dataset: &DatasetId,
-    content_revision: Revision,
+    basis: GameComparisonBasis,
     repairs: &[EncounterRepair],
 ) -> Result<usize, StoreError> {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
     check_dataset(&tx, dataset)?;
-    check_content_revision(&tx, content_revision)?;
+    check_comparison_basis(&tx, basis)?;
     let mut changed = 0;
     for repair in repairs {
         let key = &repair.key;
@@ -175,8 +211,12 @@ pub(super) fn repair_choice_encounters(
         game_choices::ensure_current(&tx, dataset, &key.source, &key.game_id, &repair.choices)?;
         let old: GameEncounters = row_values::read_selected(
             &tx,
-            "SELECT target_id,answer_version,missed FROM game_encounters
-             WHERE (dataset_id,source,game_id,learner)=(?1,?2,?3,?4)",
+            "SELECT target_id,answer_version,missed FROM game_encounters AS encounter
+             WHERE (dataset_id,source,game_id,learner)=(?1,?2,?3,?4)
+               AND NOT EXISTS (SELECT 1 FROM current_content AS item
+                   JOIN repertoire_suspensions AS suspended
+                     ON (suspended.dataset_id,suspended.repertoire_id)=(item.dataset_id,item.repertoire)
+                   WHERE (item.dataset_id,item.target_id)=(encounter.dataset_id,encounter.target_id))",
             input,
             |row| {
                 Ok((
@@ -285,6 +325,8 @@ pub(super) fn gaps(
          SELECT DISTINCT gap.source,gap.game_id,gap.repertoire_id,position,actual_move
          FROM game_opponent_gaps AS gap
          WHERE gap.dataset_id=?1
+           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
+               WHERE (suspended.dataset_id,suspended.repertoire_id)=(gap.dataset_id,gap.repertoire_id))
            AND (NOT EXISTS (SELECT 1 FROM game_learner_accounts WHERE dataset_id=?1)
                 OR EXISTS (SELECT 1 FROM game_learner_accounts AS configured
                    WHERE configured.dataset_id=?1 AND configured.learner=gap.learner
