@@ -56,7 +56,7 @@ pub(super) fn accept(
         &analysis.source,
         &analysis.game_id,
         &analysis.learner,
-        &analysis.detector,
+        &analysis.report,
         &analysis.analysis_version,
     ]
     .iter()
@@ -121,8 +121,8 @@ pub(super) fn accept(
     }
     let prior: Option<(String, String)> = tx.query_row(
         "SELECT payload_fingerprint,acceptance FROM tactical_analyses WHERE
-         (dataset_id,source,game_id,learner,detector,analysis_version,game_fingerprint,position_id,deeper)=(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-        params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.detector,
+         (dataset_id,source,game_id,learner,report,analysis_version,game_fingerprint,position_id,deeper)=(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,
             analysis.analysis_version,analysis.game_fingerprint,position_id,deeper], |r| Ok((r.get(0)?,r.get(1)?))
     ).optional().map_err(database_error)?;
     if let Some((fingerprint, payload)) = prior {
@@ -213,16 +213,17 @@ pub(super) fn accept(
     };
     if has_position_findings(analysis.status) {
         // Retain audit rows while letting a complete scan replace the current
-        // findings, including a changed game under the same detector version.
+        // findings, including a changed game under the same report version.
         tx.execute(
             "UPDATE tactical_observations SET current=0 WHERE
-            (dataset_id,source,game_id,learner,detector)=(?1,?2,?3,?4,?5) AND (?6 IS NULL OR ply=?6)",
+            (dataset_id,source,game_id,learner,report)=(?1,?2,?3,?4,?5) AND (?6 IS NULL OR ply=?6)",
             params![
                 dataset.0,
                 analysis.source,
                 analysis.game_id,
                 analysis.learner,
-                analysis.detector, ply
+                analysis.report,
+                ply
             ],
         )
         .map_err(database_error)?;
@@ -231,13 +232,13 @@ pub(super) fn accept(
         let producer_id = observation
             .producer
             .as_ref()
-            .map_or(analysis.detector.as_str(), |producer| producer.id.as_str());
+            .map_or(analysis.report.as_str(), |producer| producer.id.as_str());
         let producer = observation.producer.as_ref().map(encode).transpose()?;
         let inserted = tx.execute(
-            "INSERT INTO tactical_observations(dataset_id,source,game_id,learner,detector,ply,motif,
+            "INSERT INTO tactical_observations(dataset_id,source,game_id,learner,report,ply,motif,
                 analysis_version,outcome,details_json,observed_at_ms,producer_id,producer) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
-             ON CONFLICT(dataset_id,source,game_id,learner,detector,ply,motif,producer_id) DO NOTHING",
-            params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.detector,
+             ON CONFLICT(dataset_id,source,game_id,learner,report,ply,motif,producer_id) DO NOTHING",
+            params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,
                 observation.ply,observation.motif,analysis.analysis_version,observation.outcome,
                 observation.details_json,analysis.analyzed_at_ms,producer_id,producer]
         ).map_err(database_error)?;
@@ -245,13 +246,13 @@ pub(super) fn accept(
         let id: u64 = tx
             .query_row(
                 "SELECT id FROM tactical_observations WHERE
-             (dataset_id,source,game_id,learner,detector,ply,motif,producer_id)=(?1,?2,?3,?4,?5,?6,?7,?8)",
+             (dataset_id,source,game_id,learner,report,ply,motif,producer_id)=(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     dataset.0,
                     analysis.source,
                     analysis.game_id,
                     analysis.learner,
-                    analysis.detector,
+                    analysis.report,
                     observation.ply,
                     observation.motif, producer_id
                 ],
@@ -316,23 +317,23 @@ pub(super) fn accept(
         tx.execute(
             "UPDATE tactical_requests SET cancelled=1 WHERE attempt_id IS NULL AND fulfilled=0
             AND observation_id IN (SELECT id FROM tactical_observations WHERE
-                (dataset_id,source,game_id,learner,detector)=(?1,?2,?3,?4,?5) AND current=0 AND (?6 IS NULL OR ply=?6))",
+                (dataset_id,source,game_id,learner,report)=(?1,?2,?3,?4,?5) AND current=0 AND (?6 IS NULL OR ply=?6))",
             params![
                 dataset.0,
                 analysis.source,
                 analysis.game_id,
                 analysis.learner,
-                analysis.detector, ply
+                analysis.report, ply
             ],
         )
         .map_err(database_error)?;
     }
     acceptance.new_request_targets.sort();
     acceptance.new_request_targets.dedup();
-    tx.execute("INSERT INTO tactical_analyses(dataset_id,source,game_id,learner,detector,analysis_version,
+    tx.execute("INSERT INTO tactical_analyses(dataset_id,source,game_id,learner,report,analysis_version,
         game_fingerprint,status,analyzed_at_ms,decisions_scanned,payload_fingerprint,error,acceptance,position_id,deeper)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-        params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.detector,
+        params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,
             analysis.analysis_version,analysis.game_fingerprint,status_name(analysis.status),
             analysis.analyzed_at_ms,analysis.decisions_scanned,digest,analysis.error,encode(&acceptance)?,position_id,deeper]
     ).map_err(database_error)?;
@@ -343,7 +344,7 @@ pub(super) fn accept(
 pub(super) fn pending_games(
     connection: &Connection,
     dataset: &DatasetId,
-    detector: &str,
+    report: &str,
     version: &str,
     after: Option<&TacticalGameCursor>,
     limit: usize,
@@ -360,7 +361,7 @@ pub(super) fn pending_games(
          WHERE o.learner IS NOT NULL AND (lower(g.white)=o.learner)!=(lower(g.black)=o.learner)
            AND (?4 IS NULL OR o.ordinal<?4)
            AND NOT EXISTS(SELECT 1 FROM tactical_analyses a WHERE
-             (a.dataset_id,a.source,a.game_id,a.learner,a.detector,a.analysis_version,a.game_fingerprint)=
+             (a.dataset_id,a.source,a.game_id,a.learner,a.report,a.analysis_version,a.game_fingerprint)=
              (g.dataset_id,g.source,g.id,o.learner,?2,?3,coalesce(g.mainline_signature,'')))
          ORDER BY o.ordinal DESC LIMIT ?5"
     ).map_err(database_error)?;
@@ -368,7 +369,7 @@ pub(super) fn pending_games(
         .query_map(
             params![
                 dataset.0,
-                detector,
+                report,
                 version,
                 after.map(|cursor| cursor.ordinal),
                 limit.clamp(1, 256)
@@ -555,10 +556,19 @@ pub(super) fn settle_attempts(
     Ok(())
 }
 
+const RETRYABLE_POSITIONS: &str = "
+    p.status='inconclusive' AND p.deeper=0 AND p.analysis_version=?2
+    AND EXISTS(
+        SELECT 1 FROM tactical_enrollment e
+        JOIN games g ON (g.dataset_id,g.source,g.id)=(e.dataset_id,e.source,e.game_id)
+        WHERE e.id=p.enrollment_id AND e.dataset_id=?1
+          AND p.game_fingerprint=coalesce(g.mainline_signature,'')
+    )";
+
 pub(super) fn statistics(
     connection: &Connection,
     dataset: &DatasetId,
-    detector: &str,
+    report: &str,
     version: &str,
 ) -> Result<TacticalStatistics, StoreError> {
     let tx = Transaction::new_unchecked(connection, TransactionBehavior::Deferred)
@@ -567,16 +577,23 @@ pub(super) fn statistics(
     let mut stats = TacticalStatistics::default();
     let mut query = tx
         .prepare(
-            "SELECT CASE WHEN a.status='inconclusive' THEN 'complete' ELSE a.status END AS result,count(DISTINCT (a.source || char(0) || a.game_id || char(0) || a.learner)),sum(a.decisions_scanned) FROM tactical_analyses a
+            "SELECT CASE WHEN a.status='inconclusive' THEN 'complete' ELSE a.status END AS result,count(DISTINCT CASE WHEN a.status IN ('failed','unsupported','timed_out')
+                OR NOT EXISTS(
+                    SELECT 1 FROM tactical_enrollment enrolled JOIN tactical_positions todo ON todo.enrollment_id=enrolled.id
+                    WHERE (enrolled.dataset_id,enrolled.source,enrolled.game_id,enrolled.learner)=
+                          (a.dataset_id,a.source,a.game_id,a.learner)
+                      AND (todo.analysis_version,todo.game_fingerprint)=(a.analysis_version,a.game_fingerprint)
+                      AND todo.status='pending'
+                ) THEN a.source || char(0) || a.game_id || char(0) || a.learner END),sum(a.decisions_scanned) FROM tactical_analyses a
         JOIN games g ON (g.dataset_id,g.source,g.id)=(a.dataset_id,a.source,a.game_id)
-        WHERE a.dataset_id=?1 AND a.detector=?2 AND a.analysis_version=?3
+        WHERE a.dataset_id=?1 AND a.report=?2 AND a.analysis_version=?3
           AND (a.position_id=0 OR a.deeper=(SELECT deeper FROM tactical_positions WHERE id=a.position_id))
           AND a.game_fingerprint=coalesce(g.mainline_signature,'')
           AND (lower(g.white)=a.learner)!=(lower(g.black)=a.learner) GROUP BY result",
         )
         .map_err(database_error)?;
     let rows = query
-        .query_map(params![dataset.0, detector, version], |r| {
+        .query_map(params![dataset.0, report, version], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, u64>(1)?,
@@ -616,14 +633,21 @@ pub(super) fn statistics(
          WHERE e.dataset_id=?1 AND p.analysis_version=?2 AND p.status='inconclusive'",
         params![dataset.0, version], |row| row.get(0),
     ).map_err(database_error)?;
+    stats.retryable_positions = tx
+        .query_row(
+            &format!("SELECT count(*) FROM tactical_positions p WHERE {RETRYABLE_POSITIONS}"),
+            params![dataset.0, version],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
     let mut outcomes = tx
         .prepare(
             "SELECT outcome,count(*) FROM tactical_observations WHERE
-        dataset_id=?1 AND detector=?2 AND analysis_version=?3 AND current=1 GROUP BY outcome",
+        dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1 GROUP BY outcome",
         )
         .map_err(database_error)?;
     stats.outcomes = outcomes
-        .query_map(params![dataset.0, detector, version], |r| {
+        .query_map(params![dataset.0, report, version], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
         })
         .map_err(database_error)?
@@ -631,15 +655,15 @@ pub(super) fn statistics(
         .map_err(database_error)?;
     stats.observations = stats.outcomes.values().sum();
     stats.pending_requests=tx.query_row("SELECT count(*) FROM tactical_requests r JOIN tactical_observations o ON o.id=r.observation_id
-        WHERE r.dataset_id=?1 AND o.detector=?2 AND r.fulfilled=0 AND r.cancelled=0",
-        params![dataset.0,detector],|r|r.get(0)).map_err(database_error)?;
+        WHERE r.dataset_id=?1 AND o.report=?2 AND r.fulfilled=0 AND r.cancelled=0",
+        params![dataset.0,report],|r|r.get(0)).map_err(database_error)?;
     Ok(stats)
 }
 
 pub(super) fn observations(
     connection: &Connection,
     dataset: &DatasetId,
-    detector: &str,
+    report: &str,
     version: &str,
     before: Option<u64>,
     limit: usize,
@@ -648,13 +672,13 @@ pub(super) fn observations(
         .map_err(database_error)?;
     active(&tx, dataset)?;
     let limit = limit.clamp(1, 256);
-    let mut query=tx.prepare("SELECT o.id,o.source,o.game_id,o.learner,o.detector,o.analysis_version,o.observed_at_ms,
+    let mut query=tx.prepare("SELECT o.id,o.source,o.game_id,o.learner,o.report,o.analysis_version,o.observed_at_ms,
         o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0),o.producer
         FROM tactical_observations o LEFT JOIN tactical_requests r ON r.observation_id=o.id
-        WHERE o.dataset_id=?1 AND o.detector=?2 AND o.analysis_version=?3 AND o.current=1
+        WHERE o.dataset_id=?1 AND o.report=?2 AND o.analysis_version=?3 AND o.current=1
           AND (?4 IS NULL OR o.id<?4) ORDER BY o.id DESC LIMIT ?5").map_err(database_error)?;
     let mut rows = query
-        .query(params![dataset.0, detector, version, before, limit + 1])
+        .query(params![dataset.0, report, version, before, limit + 1])
         .map_err(database_error)?;
     let mut observations = Vec::new();
     while let Some(r) = rows.next().map_err(database_error)? {
@@ -674,7 +698,7 @@ pub(super) fn observations(
             source: r.get(1).map_err(database_error)?,
             game_id: r.get(2).map_err(database_error)?,
             learner: r.get(3).map_err(database_error)?,
-            detector: r.get(4).map_err(database_error)?,
+            report: r.get(4).map_err(database_error)?,
             analysis_version: r.get(5).map_err(database_error)?,
             observed_at_ms: r.get(6).map_err(database_error)?,
             observation: TacticalObservation {
@@ -880,16 +904,16 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn retry_position_analysis(&self, dataset: &DatasetId) -> Result<(), StoreError> {
+    pub fn retry_position_analysis(
+        &self,
+        dataset: &DatasetId,
+        version: &str,
+    ) -> Result<(), StoreError> {
         active(&self.connection, dataset)?;
-        self.connection
-            .execute(
-                "UPDATE tactical_positions SET deeper=1,status='pending'
-             WHERE status='inconclusive' AND deeper=0 AND enrollment_id IN
-             (SELECT id FROM tactical_enrollment WHERE dataset_id=?1)",
-                [&dataset.0],
-            )
-            .map_err(database_error)?;
+        self.connection.execute(
+            &format!("UPDATE tactical_positions AS p SET deeper=1,status='pending' WHERE {RETRYABLE_POSITIONS}"),
+            params![dataset.0, version],
+        ).map_err(database_error)?;
         Ok(())
     }
 }

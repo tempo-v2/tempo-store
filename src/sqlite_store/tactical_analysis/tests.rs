@@ -49,7 +49,7 @@ fn analysis(id: &str, target: Option<&TargetId>) -> TacticalAnalysis {
         source: "pgn".into(),
         game_id: id.into(),
         learner: "white".into(),
-        detector: "hanging_material".into(),
+        report: "hanging_material".into(),
         analysis_version: "v1".into(),
         game_fingerprint: id.into(),
         analyzed_at_ms: 1_000,
@@ -242,7 +242,7 @@ fn zero_based_occurrences_retract_on_replacement_without_erasing_audit_or_mixing
     game(&store, "two");
     accept(&mut store, &analysis("two", Some(&target)), &target);
 
-    // The accepted game's move history can change without a detector upgrade.
+    // The accepted game's move history can change without a report upgrade.
     store
         .connection
         .execute(
@@ -839,6 +839,17 @@ fn retry_and_attribution_follow_explicit_position_contract() {
     assert!(store.commit_tactical_analysis(commit(), &result).is_err());
     result.observations[0].producer = Some(member);
     store.commit_tactical_analysis(commit(), &result).unwrap();
+    let partial = store
+        .tactical_statistics(&dataset, "hanging_material", "v1")
+        .unwrap();
+    assert_eq!(
+        (
+            partial.completed_games,
+            partial.pending_games,
+            partial.decisions_scanned
+        ),
+        (0, 1, 1)
+    );
     let second = store
         .next_position_analysis(&dataset, "v1", None)
         .unwrap()
@@ -848,11 +859,40 @@ fn retry_and_attribution_follow_explicit_position_contract() {
     result.observations.clear();
     result.status = TacticalAnalysisStatus::Inconclusive;
     store.commit_tactical_analysis(commit(), &result).unwrap();
-    store.retry_position_analysis(&dataset).unwrap();
+    let before_retry = store
+        .tactical_statistics(&dataset, "hanging_material", "v1")
+        .unwrap();
+    assert_eq!(
+        (
+            before_retry.inconclusive_positions,
+            before_retry.retryable_positions
+        ),
+        (1, 1)
+    );
+    store.retry_position_analysis(&dataset, "v1").unwrap();
     let retry = store
         .next_position_analysis(&dataset, "v1", None)
         .unwrap()
         .unwrap();
     assert_eq!(retry.run.ply, 2);
     assert!(retry.run.deeper);
+    result.position = Some(retry.run);
+    store.commit_tactical_analysis(commit(), &result).unwrap();
+    let exhausted = store
+        .tactical_statistics(&dataset, "hanging_material", "v1")
+        .unwrap();
+    assert_eq!(
+        (
+            exhausted.inconclusive_positions,
+            exhausted.retryable_positions
+        ),
+        (1, 0)
+    );
+    store.retry_position_analysis(&dataset, "v1").unwrap();
+    assert!(
+        store
+            .next_position_analysis(&dataset, "v1", None)
+            .unwrap()
+            .is_none()
+    );
 }

@@ -3,7 +3,7 @@ CREATE TABLE tactical_analyses (
     source TEXT NOT NULL,
     game_id TEXT NOT NULL,
     learner TEXT NOT NULL,
-    detector TEXT NOT NULL,
+    report TEXT NOT NULL,
     analysis_version TEXT NOT NULL,
     game_fingerprint TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('complete','inconclusive','failed','timed_out','unsupported')),
@@ -14,7 +14,7 @@ CREATE TABLE tactical_analyses (
     acceptance TEXT NOT NULL,
     position_id INTEGER NOT NULL DEFAULT 0,
     deeper INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY(dataset_id,source,game_id,learner,detector,analysis_version,game_fingerprint,position_id,deeper),
+    PRIMARY KEY(dataset_id,source,game_id,learner,report,analysis_version,game_fingerprint,position_id,deeper),
     FOREIGN KEY(dataset_id,source,game_id) REFERENCES games(dataset_id,source,id)
 ) STRICT;
 
@@ -24,7 +24,7 @@ CREATE TABLE tactical_observations (
     source TEXT NOT NULL,
     game_id TEXT NOT NULL,
     learner TEXT NOT NULL,
-    detector TEXT NOT NULL,
+    report TEXT NOT NULL,
     ply INTEGER NOT NULL CHECK(ply >= 0),
     motif TEXT NOT NULL,
     producer_id TEXT NOT NULL,
@@ -34,11 +34,11 @@ CREATE TABLE tactical_observations (
     details_json TEXT NOT NULL CHECK(json_valid(details_json)),
     observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
     current INTEGER NOT NULL DEFAULT 1 CHECK(current IN (0,1)),
-    UNIQUE(dataset_id,source,game_id,learner,detector,ply,motif,producer_id),
+    UNIQUE(dataset_id,source,game_id,learner,report,ply,motif,producer_id),
     UNIQUE(id,dataset_id),
     FOREIGN KEY(dataset_id,source,game_id) REFERENCES games(dataset_id,source,id)
 ) STRICT;
-CREATE INDEX tactical_observations_read ON tactical_observations(dataset_id,detector,id DESC);
+CREATE INDEX tactical_observations_read ON tactical_observations(dataset_id,report,id DESC);
 
 CREATE TABLE tactical_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

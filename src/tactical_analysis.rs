@@ -1,4 +1,4 @@
-//! Durable tactical observations, independent of puzzle identity and detector revision.
+//! Durable tactical observations, independent of puzzle identity and report revision.
 use crate::GameRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ pub struct TacticalPuzzleRef {
     pub version: ContentVersion,
 }
 
-/// `outcome` and `details_json` are the detector's authoritative result, retained
+/// `outcome` and `details_json` are the report's authoritative result, retained
 /// for reporting. Store never interprets them to choose a learning action.
 /// `train` is the application's explicit instruction to request blind recall.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ pub struct TacticalAnalysis {
     pub source: String,
     pub game_id: String,
     pub learner: String,
-    pub detector: String,
+    pub report: String,
     pub analysis_version: String,
     /// The accepted game's stored mainline signature, unchanged by the caller.
     pub game_fingerprint: String,
@@ -92,7 +92,7 @@ pub struct StoredTacticalObservation {
     pub source: String,
     pub game_id: String,
     pub learner: String,
-    pub detector: String,
+    pub report: String,
     pub analysis_version: String,
     pub observed_at_ms: u64,
     /// In this read model, `train` identifies the noncancelled request's retained
@@ -118,6 +118,7 @@ pub struct TacticalStatistics {
     pub pending_games: u64,
     pub pending_positions: u64,
     pub inconclusive_positions: u64,
+    pub retryable_positions: u64,
     pub decisions_scanned: u64,
     pub observations: u64,
     pub outcomes: BTreeMap<String, u64>,
