@@ -563,7 +563,7 @@ fn study_lead_in_backfill_only_changes_current_metadata_and_rejects_stale_writes
     let initial = tempo_chess::apply_setup_move(tempo_chess::START_FEN, "e2e4").unwrap();
     let solver = &before.catalog.items[&target].definition.decisions[0].fen;
     let context = tempo_chess::OpponentLeadIn::verified(&initial, "e7e5", solver).unwrap();
-    let updates = BTreeMap::from([(target.clone(), context.clone())]);
+    let updates = BTreeMap::from([(target.clone(), LeadInEvidence::Verified(context.clone()))]);
 
     store
         .backfill_opponent_lead_ins(&before.dataset, before.revision, &updates)
@@ -574,7 +574,9 @@ fn study_lead_in_backfill_only_changes_current_metadata_and_rejects_stale_writes
     assert_eq!(after.active_attempt, before.active_attempt);
     assert_eq!(after.content_history, before.content_history);
     assert_eq!(
-        after.catalog.items[&target].opponent_lead_in.as_ref(),
+        after.catalog.items[&target]
+            .opponent_lead_in
+            .verified_move(),
         Some(&context)
     );
     assert_eq!(

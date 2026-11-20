@@ -11,7 +11,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use std::{collections::BTreeMap, path::Path, time::Duration};
-use tempo_chess::{Catalog, ContentItem, OpponentLeadIn};
+use tempo_chess::{Catalog, ContentItem, LeadInEvidence};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
@@ -188,10 +188,13 @@ impl SqliteStore {
         &mut self,
         dataset: &DatasetId,
         expected: Revision,
-        moves: &BTreeMap<TargetId, OpponentLeadIn>,
+        evidence: &BTreeMap<TargetId, LeadInEvidence>,
     ) -> Result<(), StoreError> {
-        if moves.is_empty() {
+        if evidence.is_empty() {
             return Ok(());
+        }
+        if evidence.values().any(LeadInEvidence::is_unavailable) {
+            return Err(invalid("expected resolved lead-in evidence"));
         }
         let tx = self
             .connection
@@ -213,7 +216,7 @@ impl SqliteStore {
                 "UPDATE current_content SET item=json_set(item,'$.opponent_lead_in',json(?1))
                  WHERE dataset_id=?2 AND target_id=?3 AND json_extract(item,'$.opponent_lead_in') IS NULL",
             ).map_err(database_error)?;
-            for (target, context) in moves {
+            for (target, context) in evidence {
                 if insert
                     .execute(params![row_values::encode(context)?, dataset.0, target.0])
                     .map_err(database_error)?
