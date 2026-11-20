@@ -67,6 +67,94 @@ pub enum RepertoireReset {
 /// [`crate::SqliteStore`] uses the same validation and publishes each batch
 /// inside one database transaction.
 pub trait Store {
+    /// Atomically accept a complete analysis and its explicit puzzle/training effects.
+    /// Replayed analysis identity returns the stored acceptance without applying writes.
+    fn commit_tactical_analysis(
+        &mut self,
+        _commit: Commit,
+        _analysis: &crate::TacticalAnalysis,
+    ) -> Result<crate::TacticalAcceptance, StoreError> {
+        Err(StoreError::Unsupported("commit_tactical_analysis"))
+    }
+
+    /// Bounded newest-first keyset read of accepted game/learner pairs with no
+    /// result for this analysis version, including games without a played date.
+    fn pending_tactical_analyses(
+        &self,
+        _dataset: &DatasetId,
+        _detector: &str,
+        _analysis_version: &str,
+        _after: Option<&crate::TacticalGameCursor>,
+        _limit: usize,
+    ) -> Result<Vec<crate::TacticalGame>, StoreError> {
+        Err(StoreError::Unsupported("pending_tactical_analyses"))
+    }
+
+    /// Unissued, unfulfilled current-version recalls; each real missed occurrence
+    /// has its own identity, even when several requests share a puzzle target.
+    fn regular_review_owed(&self, _dataset: &DatasetId) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn tactical_lead_in(
+        &self,
+        _dataset: &DatasetId,
+        _request_id: u64,
+    ) -> Result<Option<tempo_chess::OpponentLeadIn>, StoreError> {
+        Ok(None)
+    }
+
+    fn pending_tactical_requests(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Vec<crate::TacticalRequest>, StoreError> {
+        Err(StoreError::Unsupported("pending_tactical_requests"))
+    }
+
+    /// Whether this exact issued attempt is bound to an unfulfilled immediate
+    /// recall. This is persistence evidence, not a scheduling or grading rule.
+    fn has_pending_tactical_request_for_attempt(
+        &self,
+        _dataset: &DatasetId,
+        _attempt: &AttemptId,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported(
+            "has_pending_tactical_request_for_attempt",
+        ))
+    }
+
+    /// Bind exactly one pending request to the newly issued attempt in this batch.
+    /// Normal Study commits fulfill that request on completion and release it on
+    /// abandonment; a later occurrence cannot be consumed by this older attempt.
+    fn commit_immediate_recall(
+        &mut self,
+        _commit: Commit,
+        _scope: StudyScope<'_>,
+        _request_id: u64,
+    ) -> Result<Revision, StoreError> {
+        Err(StoreError::Unsupported("commit_immediate_recall"))
+    }
+
+    fn tactical_statistics(
+        &self,
+        _dataset: &DatasetId,
+        _detector: &str,
+        _analysis_version: &str,
+    ) -> Result<crate::TacticalStatistics, StoreError> {
+        Err(StoreError::Unsupported("tactical_statistics"))
+    }
+
+    fn tactical_observations(
+        &self,
+        _dataset: &DatasetId,
+        _detector: &str,
+        _analysis_version: &str,
+        _before: Option<u64>,
+        _limit: usize,
+    ) -> Result<crate::TacticalObservationPage, StoreError> {
+        Err(StoreError::Unsupported("tactical_observations"))
+    }
+
     /// Read a consistent owned view without changing stored state.
     fn snapshot(&self) -> Result<Snapshot, StoreError>;
     /// Read current study state with only the referenced outcome/receipt.

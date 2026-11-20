@@ -6,7 +6,7 @@ use crate::{
 };
 use tempo_chess::Catalog;
 use tempo_learning::SchedulerSettings;
-use tempo_types::{DatasetId, Revision};
+use tempo_types::{AttemptId, DatasetId, Revision};
 
 /// An atomic in-memory implementation of [`Store`] for wiring and contract tests.
 ///
@@ -45,6 +45,33 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
+    fn has_pending_tactical_request_for_attempt(
+        &self,
+        dataset: &DatasetId,
+        _attempt: &AttemptId,
+    ) -> Result<bool, StoreError> {
+        if *dataset != self.state.dataset {
+            return Err(StoreError::Conflict(
+                "tactical recall dataset changed".into(),
+            ));
+        }
+        // This adapter cannot accept tactical analyses or bind their requests.
+        Ok(false)
+    }
+
+    fn pending_tactical_requests(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Vec<crate::TacticalRequest>, StoreError> {
+        if *dataset != self.state.dataset {
+            return Err(StoreError::Conflict(
+                "tactical recall dataset changed".into(),
+            ));
+        }
+        // This adapter cannot accept tactical analyses, so it has no such requests.
+        Ok(Vec::new())
+    }
+
     fn snapshot(&self) -> Result<Snapshot, StoreError> {
         Ok(self.state.clone())
     }

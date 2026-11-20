@@ -486,6 +486,16 @@ impl SqliteStore {
                     ],
                 )
                 .map_err(database_error)?;
+            if raw == 1 {
+                super::tactical_analysis::enroll(
+                    &transaction,
+                    &previous.dataset,
+                    &game.source,
+                    &game.id,
+                    &entry.summary.learner,
+                    true,
+                )?;
+            }
             if raw == 0
                 && let Some(timing) = game.precise_pgn_timing()
             {
@@ -919,34 +929,50 @@ mod tests {
     fn archive_pages_keep_each_learners_latest_comparison_at_the_original_watermark() {
         let dir = tempfile::tempdir().unwrap();
         let dataset: DatasetId = "archive".into();
-        let db = SqliteStore::create(dir.path().join("archive.sqlite"), dataset.clone(),
-            tempo_chess::demo_catalog(), tempo_learning::DailyLearning::default().settings()).unwrap();
+        let db = SqliteStore::create(
+            dir.path().join("archive.sqlite"),
+            dataset.clone(),
+            tempo_chess::demo_catalog(),
+            tempo_learning::DailyLearning::default().settings(),
+        )
+        .unwrap();
         let add_comparison = |id: &str, receipt: String, learner: &str, books: &str| {
-            db.connection.execute("INSERT INTO game_comparisons(dataset_id,id,source,game_id,summary)
+            db.connection
+                .execute(
+                    "INSERT INTO game_comparisons(dataset_id,id,source,game_id,summary)
                 VALUES('archive',?1,'pgn',?2,json_object('learner',?3,'repertoires',json(?4)))",
-                params![receipt,id,learner,books]).unwrap();
+                    params![receipt, id, learner, books],
+                )
+                .unwrap();
         };
         for index in 0..257 {
             let id = format!("game-{index}");
-            db.connection.execute("INSERT INTO games(dataset_id,source,id,white,black,fetched_ms,pgn)
-                VALUES('archive','pgn',?1,'White','Black',0,'1.e4 e5 1-0')", [&id]).unwrap();
+            db.connection
+                .execute(
+                    "INSERT INTO games(dataset_id,source,id,white,black,fetched_ms,pgn)
+                VALUES('archive','pgn',?1,'White','Black',0,'1.e4 e5 1-0')",
+                    [&id],
+                )
+                .unwrap();
             add_comparison(&id, format!("first-{index}"), "white", "[]");
         }
         add_comparison("game-0", "second-learner".into(), "black", "[]");
-        let first = db.game_library(&dataset,None,None).unwrap();
-        assert_eq!(first.entries.len(),256);
+        let first = db.game_library(&dataset, None, None).unwrap();
+        assert_eq!(first.entries.len(), 256);
         assert_eq!(first.entries[0].learner, "black");
         let book = r#"[{"repertoire_id":"italian","source_available":true,"first_departure":{"kind":"opponent_gap","ply":2},"reentry_ply":null}]"#;
         add_comparison("game-0", "newer".into(), "white", book);
-        let tail = db.game_library(&dataset,Some(first.through),first.next_before).unwrap();
-        assert_eq!(tail.entries.len(),2);
-        assert_eq!(tail.next_before,None);
-        assert_eq!(tail.entries[1].game.id,"game-0");
+        let tail = db
+            .game_library(&dataset, Some(first.through), first.next_before)
+            .unwrap();
+        assert_eq!(tail.entries.len(), 2);
+        assert_eq!(tail.next_before, None);
+        assert_eq!(tail.entries[1].game.id, "game-0");
         assert!(tail.entries[1].repertoires.is_empty());
-        let newest = db.game_library(&dataset,None,None).unwrap();
-        assert_eq!(newest.entries[0].repertoires[0].repertoire_id,"italian");
-        assert_eq!(newest.entries[1].learner,"black");
-        assert!(db.game_library(&"foreign".into(),None,None).is_err());
+        let newest = db.game_library(&dataset, None, None).unwrap();
+        assert_eq!(newest.entries[0].repertoires[0].repertoire_id, "italian");
+        assert_eq!(newest.entries[1].learner, "black");
+        assert!(db.game_library(&"foreign".into(), None, None).is_err());
     }
 
     #[test]
