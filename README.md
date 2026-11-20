@@ -13,7 +13,7 @@ file. The application composes transactions and passes domain components values.
 | `Commit` | The complete batch and the snapshot stamps it was based on. | It does not calculate grades, learning policy or content changes. |
 | `Store` | The port that returns snapshots and accepts atomic commits. | It does not choose which application operation to run. |
 | `MemoryStore` | A process-local adapter for demos and contract tests. | It has no persistent state. |
-| `SqliteStore` | A file-backed adapter for restarting with the same data. | It accepts the current version-1 schema. |
+| `SqliteStore` | A file-backed adapter for restarting with the same data. | It accepts the current SQLite schema. |
 
 All public concepts now have named files, “When to use” documentation and
 same-file Rust usage tests. Existing root imports remain available. Start with
@@ -26,6 +26,7 @@ reply before committing them together.
 | Concept | File | Usage scenario in that file |
 | --- | --- | --- |
 | Consistent read view | [snapshot.rs](src/snapshot.rs) | Local edits do not persist, and older snapshots remain consistent after a commit. |
+| Scoped Study and content reads | [study_state.rs](src/study_state.rs), [content_state.rs](src/content_state.rs) | Read an addressed target or a complete current catalog with its own coverage and revision. |
 | Typed persistence requests | [write.rs](src/write.rs) | Restore under a new dataset identity and reject reuse of an old empty dataset. |
 | Atomic application batch | [commit.rs](src/commit.rs) | Full answer → assessment → Learning → receipt composition; stale revisions and duplicate effects fail. |
 | Adapter interface | [store.rs](src/store.rs) | Issue an attempt through `&mut dyn Store`, without depending on memory internals. |
@@ -40,6 +41,33 @@ reply before committing them together.
 | Submission replay record | [receipt.rs](src/receipt.rs) | Reject inconsistent replies; retain exact historical replies after restore. |
 | Versioned content archive | [content_history.rs](src/content_history.rs) | Keep both semantic versions; a label edit does not add another version. |
 | Persistence failure | [store_error.rs](src/store_error.rs) | A stale snapshot produces a conflict and preserves the newer committed state. |
+
+## Scoped reads and adapter support
+
+SQLite reads the active and requested attempts by ID, their human
+assessments by dataset and attempt ID, and a submission receipt by ID.
+A selected read loads only the active/requested targets. A complete read
+adds current catalog and Learning. Content planners receive a separate
+complete current catalog and both revisions from the same transaction.
+Historical definitions still use `issued_item` and full inspection and
+portable export retain their complete reads.
+
+| Store methods | SQLite | Memory and the delegating Study fixture |
+| --- | --- | --- |
+| `snapshot`, `study_state`, `content_state`, `stored_attempt`, `issued_item`, `commit`, `commit_study` | Supported | Supported |
+| `portable_state`, `restore_with_game_evidence` | Supported, including game acceptance and reset boundaries | Study-only snapshots and restores with empty game evidence |
+| `repertoire_reset_at` | Reads the latest accepted reset | Empty because this adapter cannot accept repertoire resets |
+| `commit_content` | Supports sources and receipts | Plain commits. Requests with a source or receipt fail before the write |
+| `tactic_page`, `tactics_extra`, `extend_tactics_allowance` | Supported | Unsupported |
+| `repertoire_document`, `reset_repertoire`, `repertoire_reset_generation`, `content_receipt` | Supported | Unsupported |
+| `commit_games`, `game_receipt`, `pgn_timing`, `verified_game`, `legacy_game_misses`, `game_comparison`, `game_choices`, `choice_encounter_keys`, `repair_choice_encounters` | Supported | Unsupported |
+| `game_failed`, `game_failures`, `correction_game`, `stored_game`, `games_in_window`, `historical_pgn_window`, `game_history` | Supported | Unsupported |
+| `game_relevance`, `game_content_revision`, `opponent_gaps`, `game_backfill_state`, `save_game_backfill_state` | Supported | Unsupported |
+| `game_move_distribution`, `save_game_move_distribution`, `replace_game_model_reach`, `game_model_projection_status`, `model_bootstrap_repertoires`, `finish_model_bootstrap` | Supported | Unsupported |
+
+Unsupported reads and effects report the operation name in
+`StoreError::Unsupported`. Tempo maps the error to the nonretryable code
+`unsupported_capability`.
 
 ### Similar-looking values with different jobs
 
