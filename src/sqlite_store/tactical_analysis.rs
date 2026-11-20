@@ -462,7 +462,7 @@ pub(super) fn has_pending_request_for_attempt(
     active(&tx, dataset)?;
     tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE
-        dataset_id=?1 AND attempt_id=?2 AND fulfilled=0 AND cancelled=0)",
+        dataset_id=?1 AND attempt_id=?2 AND fulfilled=0)",
         params![dataset.0, attempt.0],
         |r| r.get(0),
     )
@@ -1046,6 +1046,14 @@ impl SqliteStore {
                         SELECT 1 FROM tactical_positions p
                         WHERE p.enrollment_id=e.id AND p.analysis_version=?2
                           AND p.game_fingerprint=g.mainline_signature AND p.status<>'complete'
+                          AND (p.status='pending' OR NOT EXISTS (
+                              SELECT 1 FROM tactical_observations o
+                              WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.ply,o.analysis_version)
+                                   =(e.dataset_id,e.source,e.game_id,e.learner,p.ply,p.analysis_version)
+                                AND o.current=1
+                                AND json_extract(o.details_json,'$.assessment.analysis.status')='complete'
+                                AND json_extract(o.details_json,'$.assessment.outcome')<>'uncertain'
+                          ))
                     ),0)
              FROM latest JOIN game_comparisons c USING(ordinal)
              JOIN games g ON (g.dataset_id,g.source,g.id)=(c.dataset_id,c.source,c.game_id)
@@ -1080,18 +1088,22 @@ impl SqliteStore {
     ) -> Result<Vec<TacticalDecisionRow>, StoreError> {
         active(&self.connection, dataset)?;
         let mut query = self.connection.prepare(
-            "SELECT id,source,game_id,ply,json_extract(details_json,'$.position'),outcome,
+            "WITH latest AS (
+                 SELECT source,game_id,max(ordinal) AS ordinal
+                 FROM game_comparisons WHERE dataset_id=?1 GROUP BY source,game_id
+             )
+             SELECT o.id,o.source,o.game_id,o.ply,json_extract(details_json,'$.position'),outcome,
                (SELECT json_group_array(json_array(json_extract(value,'$.motif'),json_extract(value,'$.answer.uci')))
                 FROM json_each(details_json,'$.assessment.personal.candidates')),
                (SELECT json_group_array(json_extract(value,'$.uci'))
                 FROM json_each(details_json,'$.assessment.accepted_moves'))
              FROM tactical_observations o
-             WHERE dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1
-               AND o.learner=(SELECT lower(json_extract(c.summary,'$.learner')) FROM game_comparisons c
-                  WHERE (c.dataset_id,c.source,c.game_id)=(o.dataset_id,o.source,o.game_id)
-                  ORDER BY c.ordinal DESC LIMIT 1)
+             JOIN latest l ON (l.source,l.game_id)=(o.source,o.game_id)
+             JOIN game_comparisons c ON c.ordinal=l.ordinal
+             WHERE o.dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1
+               AND o.learner=lower(json_extract(c.summary,'$.learner'))
                AND json_type(details_json,'$.assessment.personal')='object'
-             ORDER BY id DESC"
+             ORDER BY o.id DESC"
         ).map_err(database_error)?;
         let mut rows = query
             .query(params![dataset.0, report, version])
