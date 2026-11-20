@@ -170,7 +170,7 @@ training decision: only the explicit `TacticalObservation::train` command does s
 | New miss becomes next work | Each distinct requested occurrence receives one durable request; Queue owns priority. |
 | Preserve the active exercise | Analysis accepts only catalog/Learning writes; it cannot change the active pointer. |
 | Scheduled Test or required Practice | Learning projects the existing daily cadence; Store persists the issued mode. |
-| Complete exactly the issued request | `commit_immediate_recall` binds one request to one new attempt. `commit_study` fulfills that request with completion, or releases it on abandonment. |
+| Complete exactly the issued request | `commit_daily_issuance` binds one request to one new attempt and persists Queue's explicit ordering effect in the same transaction. `commit_study` fulfills that request with completion, or releases it on abandonment. |
 | Retry without repeating effects | An analysis-version marker retains the accepted result; replay performs no writes and returns no new deferral-clearing targets. |
 
 A later miss creates a different request even if its puzzle is identical. An older

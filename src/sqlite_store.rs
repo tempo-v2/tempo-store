@@ -535,13 +535,14 @@ impl Store for SqliteStore {
     ) -> Result<bool, StoreError> {
         tactical_analysis::has_pending_request_for_attempt(&self.connection, dataset, attempt)
     }
-    fn commit_immediate_recall(
+    fn commit_daily_issuance(
         &mut self,
         commit: Commit,
         scope: StudyScope<'_>,
-        request_id: u64,
+        immediate_request: Option<u64>,
+        ordering: crate::StudyOrderingWrite,
     ) -> Result<Revision, StoreError> {
-        tactical_analysis::issue(&mut self.connection, commit, scope, request_id)
+        tactical_analysis::issue_daily(&mut self.connection, commit, scope, immediate_request, ordering)
     }
     fn tactical_statistics(
         &self,
@@ -1126,11 +1127,6 @@ impl Store for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        if commit.writes.iter().any(|write| matches!(write, Write::Issue(record)
-            if !record.first_introduction && matches!(record.mode, crate::ActivityMode::Repair | crate::ActivityMode::Test))) {
-            transaction.execute("DELETE FROM tactical_study_turn WHERE dataset_id=?1", [&commit.expected_dataset.0])
-                .map_err(database_error)?;
-        }
         let state = load_study::load_study(&transaction, scope)?;
         let previous = load_study::staging_image(state);
         let next = stage_commit(&previous, commit)?;

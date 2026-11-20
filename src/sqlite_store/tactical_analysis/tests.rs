@@ -141,7 +141,7 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
         opponent_lead_in: None,
     };
     store
-        .commit_immediate_recall(
+        .commit_daily_issuance(
             Commit {
                 expected_dataset: snapshot.dataset,
                 expected_revision: snapshot.revision,
@@ -154,7 +154,8 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
                 target: Some(&request.target),
                 ..Default::default()
             },
-            request.id,
+            Some(request.id),
+            StudyOrderingWrite::OweRegularReview,
         )
         .unwrap();
     record
@@ -595,11 +596,12 @@ fn abandonment_releases_exact_request_and_failed_binding_rolls_back_issuance() {
         vec![request.clone()]
     );
     let before = store.snapshot().unwrap();
+    assert!(store.regular_review_owed(&dataset).unwrap());
     let mut attempted = record;
     attempted.attempt.id = "nonexistent-request-attempt".into();
     assert!(
         store
-            .commit_immediate_recall(
+            .commit_daily_issuance(
                 Commit {
                     expected_dataset: dataset.clone(),
                     expected_revision: before.revision,
@@ -612,11 +614,13 @@ fn abandonment_releases_exact_request_and_failed_binding_rolls_back_issuance() {
                     target: Some(&target),
                     ..Default::default()
                 },
-                request.id + 1
+                Some(request.id + 1),
+                StudyOrderingWrite::SatisfyRegularReview,
             )
             .is_err()
     );
     assert_eq!(store.snapshot().unwrap(), before);
+    assert!(store.regular_review_owed(&dataset).unwrap());
     assert_eq!(
         store.pending_tactical_requests(&dataset).unwrap(),
         vec![request]

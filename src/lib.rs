@@ -46,7 +46,8 @@ pub use repertoire_activity::{
 pub use snapshot::Snapshot;
 pub use sqlite_store::SqliteStore;
 pub use store::{
-    ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyScope,
+    ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyOrderingWrite,
+    StudyScope,
 };
 pub use store_error::StoreError;
 pub use stored_attempt::{

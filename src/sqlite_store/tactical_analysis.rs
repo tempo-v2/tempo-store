@@ -511,75 +511,61 @@ pub(super) fn pending_requests(
         .collect()
 }
 
-pub(super) fn issue(
+pub(super) fn issue_daily(
     connection: &mut Connection,
     commit: Commit,
     scope: StudyScope<'_>,
-    request_id: u64,
+    immediate_request: Option<u64>,
+    ordering: StudyOrderingWrite,
 ) -> Result<Revision, StoreError> {
-    if commit
-        .writes
-        .iter()
-        .any(|write| !matches!(write, Write::Issue(_) | Write::Active(_)))
+    let record = commit.daily_issued_attempt()?;
+    if immediate_request.is_some()
+        && !matches!(record.mode, ActivityMode::Test | ActivityMode::Practice)
     {
-        return Err(invalid(
-            "immediate issuance may only issue and activate one attempt",
-        ));
-    }
-    let issued: Vec<_> = commit
-        .writes
-        .iter()
-        .filter_map(|write| {
-            if let Write::Issue(record) = write {
-                Some(record)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let [record] = issued.as_slice() else {
-        return Err(invalid("immediate recall requires exactly one new attempt"));
-    };
-    if !matches!(record.mode, ActivityMode::Test | ActivityMode::Practice) {
         return Err(invalid("immediate recall must use blind Test or Practice"));
     }
-    let record = (*record).clone();
+    let binding = immediate_request.map(|request| (request, record.attempt.id.clone()));
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
     let state = load_study::load_study(&tx, scope)?;
     if state.active_attempt.is_some() {
-        return Err(conflict(
-            "finish the active attempt before immediate recall",
-        ));
+        return Err(conflict("finish the active attempt before daily issuance"));
     }
     let previous = load_study::staging_image(state);
     let next = stage_commit(&previous, commit)?;
-    if next.active_attempt.as_ref() != Some(&record.attempt.id) {
-        return Err(invalid("immediate attempt must become active"));
-    }
     save_snapshot(&tx, Some(&previous), &next)?;
-    let changed = tx
-        .execute(
-            "UPDATE tactical_requests SET attempt_id=?2 WHERE id=?1 AND dataset_id=?3
-        AND target_id=?4 AND version=?5 AND fulfilled=0 AND cancelled=0 AND attempt_id IS NULL",
-            params![
-                request_id,
-                record.attempt.id.0,
-                next.dataset.0,
-                record.attempt.target.0,
-                record.attempt.content_version.0.to_be_bytes().as_slice()
-            ],
-        )
-        .map_err(database_error)?;
-    if changed != 1 {
-        return Err(conflict("immediate recall request changed before issuance"));
+    if let Some((request_id, id)) = binding {
+        let record = &next.attempts[&id];
+        let changed = tx
+            .execute(
+                "UPDATE tactical_requests SET attempt_id=?2 WHERE id=?1 AND dataset_id=?3
+                 AND target_id=?4 AND version=?5 AND fulfilled=0 AND cancelled=0 AND attempt_id IS NULL",
+                params![
+                    request_id,
+                    record.attempt.id.0,
+                    next.dataset.0,
+                    record.attempt.target.0,
+                    record.attempt.content_version.0.to_be_bytes().as_slice()
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(conflict("immediate recall request changed before issuance"));
+        }
     }
-    tx.execute(
-        "INSERT INTO tactical_study_turn VALUES(?1) ON CONFLICT DO NOTHING",
-        [&next.dataset.0],
-    )
-    .map_err(database_error)?;
+    let ordering_sql = match ordering {
+        StudyOrderingWrite::Preserve => None,
+        StudyOrderingWrite::OweRegularReview => {
+            Some("INSERT INTO tactical_study_turn VALUES(?1) ON CONFLICT DO NOTHING")
+        }
+        StudyOrderingWrite::SatisfyRegularReview => {
+            Some("DELETE FROM tactical_study_turn WHERE dataset_id=?1")
+        }
+    };
+    if let Some(sql) = ordering_sql {
+        tx.execute(sql, [&next.dataset.0]).map_err(database_error)?;
+    }
     tx.commit().map_err(database_error)?;
     Ok(next.revision)
 }

@@ -39,6 +39,19 @@ pub struct Commit {
     pub writes: Vec<Write>,
 }
 
+impl Commit {
+    pub(super) fn daily_issued_attempt(&self) -> Result<&crate::StoredAttempt, crate::StoreError> {
+        match self.writes.as_slice() {
+            [Write::Issue(record), Write::Active(Some(active))] if &record.attempt.id == active => {
+                Ok(record)
+            }
+            _ => Err(crate::store_error::invalid(
+                "daily issuance must issue and activate exactly one attempt",
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

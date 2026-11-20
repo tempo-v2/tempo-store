@@ -16,6 +16,14 @@ pub struct StudyScope<'a> {
     pub submission: Option<&'a SubmissionId>,
 }
 
+/// Explicit persistence effect on the daily queue's regular-review turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StudyOrderingWrite {
+    Preserve,
+    OweRegularReview,
+    SatisfyRegularReview,
+}
+
 pub struct ContentReceipt<'a> {
     pub request: &'a str,
     pub reply: &'a str,
@@ -90,10 +98,9 @@ pub trait Store {
         Err(StoreError::Unsupported("pending_tactical_analyses"))
     }
 
-    /// Unissued, unfulfilled current-version recalls; each real missed occurrence
-    /// has its own identity, even when several requests share a puzzle target.
+    /// Read the review turn established by successful daily issuance.
     fn regular_review_owed(&self, _dataset: &DatasetId) -> Result<bool, StoreError> {
-        Ok(false)
+        Err(StoreError::Unsupported("regular_review_owed"))
     }
 
     /// The original version remains authoritative once a request is issued.
@@ -115,6 +122,8 @@ pub trait Store {
         Ok(None)
     }
 
+    /// Unissued, unfulfilled current-version recalls; each real missed occurrence
+    /// has its own identity, even when several requests share a puzzle target.
     fn pending_tactical_requests(
         &self,
         _dataset: &DatasetId,
@@ -134,16 +143,18 @@ pub trait Store {
         ))
     }
 
-    /// Bind exactly one pending request to the newly issued attempt in this batch.
-    /// Normal Study commits fulfill that request on completion and release it on
-    /// abandonment; a later occurrence cannot be consumed by this older attempt.
-    fn commit_immediate_recall(
+    /// Issue and activate one attempt, persist Queue's ordering effect, and bind
+    /// the supplied exact pending request, if any, in one revision-checked batch.
+    /// Normal Study commits fulfill the bound request on completion and release
+    /// it on abandonment. An already issued attempt is resumed by the caller.
+    fn commit_daily_issuance(
         &mut self,
         _commit: Commit,
         _scope: StudyScope<'_>,
-        _request_id: u64,
+        _immediate_request: Option<u64>,
+        _ordering: StudyOrderingWrite,
     ) -> Result<Revision, StoreError> {
-        Err(StoreError::Unsupported("commit_immediate_recall"))
+        Err(StoreError::Unsupported("commit_daily_issuance"))
     }
 
     fn tactical_statistics(
