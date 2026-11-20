@@ -13,6 +13,10 @@ mod content_history;
 mod memory_store;
 mod receipt;
 mod receipt_result;
+mod saved_review;
+pub use saved_review::{
+    ReviewCommandKey, ReviewPosition, ReviewWrite, SavedReview, SavedReviewContext,
+};
 mod snapshot;
 mod sqlite_store;
 mod store;
