@@ -305,15 +305,11 @@ impl SqliteStore {
         self.choice_migration.as_ref()
     }
 
-    /// Cheap local-runtime trigger. Model preparation runs separately.
-    pub fn model_content_marker(&self) -> Result<(DatasetId, Revision), StoreError> {
-        self.connection
-            .query_row(
-                "SELECT dataset_id,content_revision FROM store_state WHERE singleton=1",
-                [],
-                |row| Ok((DatasetId(row.get(0)?), Revision(row.get(1)?))),
-            )
-            .map_err(database_error)
+    /// Current model and Games inputs, without reading documents or targets.
+    pub fn game_comparison_marker(
+        &self,
+    ) -> Result<(DatasetId, crate::GameComparisonBasis), StoreError> {
+        game_relevance::comparison_marker(&self.connection)
     }
 
     /// Read desired books, source associations and active target facts at one revision.
@@ -360,20 +356,20 @@ impl Store for SqliteStore {
         saved_reviews::write(&mut self.connection, key, change)
     }
 
+    fn repertoire_activity(
+        &self,
+        command: &crate::RepertoireActivityCommand<'_>,
+    ) -> Result<crate::RepertoireActivityRead, StoreError> {
+        repertoire_suspensions::context(&self.connection, command)
+    }
+
     fn set_repertoire_activity(
         &mut self,
-        dataset: &DatasetId,
-        repertoire: &str,
-        command_id: &str,
-        activity: crate::RepertoireActivity,
+        command: &crate::RepertoireActivityCommand<'_>,
+        expected_revision: Revision,
+        abandoned: Option<crate::ChessAttempt>,
     ) -> Result<crate::RepertoireActivityResult, StoreError> {
-        repertoire_suspensions::apply(
-            &mut self.connection,
-            dataset,
-            repertoire,
-            command_id,
-            activity,
-        )
+        repertoire_suspensions::apply(&mut self.connection, command, expected_revision, abandoned)
     }
 
     fn reset_repertoire(
@@ -522,15 +518,10 @@ impl Store for SqliteStore {
     fn repair_choice_encounters(
         &mut self,
         dataset: &DatasetId,
-        content_revision: Revision,
+        basis: crate::GameComparisonBasis,
         repairs: &[crate::EncounterRepair],
     ) -> Result<usize, StoreError> {
-        game_relevance::repair_choice_encounters(
-            &mut self.connection,
-            dataset,
-            content_revision,
-            repairs,
-        )
+        game_relevance::repair_choice_encounters(&mut self.connection, dataset, basis, repairs)
     }
 
     fn game_failed(
@@ -651,15 +642,12 @@ impl Store for SqliteStore {
         game_relevance::read(&self.connection, dataset, model)
     }
 
-    fn game_content_revision(&self, dataset: &DatasetId) -> Result<Option<Revision>, StoreError> {
-        self.connection
-            .query_row(
-                "SELECT content_revision FROM store_state WHERE singleton=1 AND dataset_id=?1",
-                [&dataset.0],
-                |row| row.get::<_, u64>(0).map(Revision),
-            )
-            .optional()
-            .map_err(database_error)
+    fn game_comparison_basis(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Option<crate::GameComparisonBasis>, StoreError> {
+        let (current, basis) = self.game_comparison_marker()?;
+        Ok((&current == dataset).then_some(basis))
     }
 
     fn opponent_gaps(
@@ -928,15 +916,9 @@ impl Store for SqliteStore {
                 ..StudyScope::default()
             },
         )?;
-        let revision: u64 = tx
-            .query_row(
-                "SELECT content_revision FROM store_state WHERE singleton=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(database_error)?;
+        let (_, basis) = game_relevance::comparison_marker(&tx)?;
         tx.commit().map_err(database_error)?;
-        ContentState::from_study(state, Revision(revision))
+        ContentState::from_study(state, basis)
     }
 
     fn commit_study(
@@ -1012,11 +994,21 @@ impl Store for SqliteStore {
         repertoire: &str,
         positions: &[tempo_chess::PositionKey],
     ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
-        let tx = self.connection.unchecked_transaction().map_err(database_error)?;
-        let current: Option<u64> = tx.query_row(
-            "SELECT content_revision FROM store_state WHERE singleton=1 AND dataset_id=?1",
-            [&dataset.0], |row| row.get(0)
-        ).optional().map_err(database_error)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(database_error)?;
+        let current: Option<u64> = tx
+            .query_row(
+                "SELECT state.content_revision FROM store_state AS state
+             WHERE state.singleton=1 AND state.dataset_id=?1
+               AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions
+                   WHERE dataset_id=state.dataset_id AND repertoire_id=?2)",
+                params![dataset.0, repertoire],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
         if current != Some(revision.0) {
             return Err(conflict("The repertoire changed while reading the game."));
         }

@@ -2,8 +2,8 @@
 use super::{database_error, game_choices, row_values};
 use crate::store_error::conflict;
 use crate::{
-    ComparedGame, ComparedRelevance, EncounterKey, EncounterRepair, GameEncounters,
-    GameTargetRelevance, GroupedOpponentGap, StoreError,
+    ComparedGame, ComparedRelevance, EncounterKey, EncounterRepair, GameComparisonBasis,
+    GameEncounters, GameTargetRelevance, GroupedOpponentGap, StoreError,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::collections::BTreeMap;
@@ -153,17 +153,44 @@ pub(super) fn check_content_revision(
     Ok(())
 }
 
+pub(super) fn comparison_marker(
+    db: &Connection,
+) -> Result<(DatasetId, GameComparisonBasis), StoreError> {
+    db.query_row(
+        "SELECT state.dataset_id,state.content_revision,coalesce(participation.revision,0)
+         FROM store_state AS state LEFT JOIN game_participation_revisions AS participation USING(dataset_id)
+         WHERE state.singleton=1",
+        [],
+        |row| Ok((DatasetId(row.get(0)?), GameComparisonBasis {
+            content: Revision(row.get(1)?),
+            participation: Revision(row.get(2)?),
+        })),
+    ).map_err(database_error)
+}
+
+pub(super) fn check_comparison_basis(
+    db: &Connection,
+    expected: GameComparisonBasis,
+) -> Result<(), StoreError> {
+    if comparison_marker(db)?.1 != expected {
+        return Err(conflict(
+            "authoring or participation changed during game comparison",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn repair_choice_encounters(
     db: &mut Connection,
     dataset: &DatasetId,
-    content_revision: Revision,
+    basis: GameComparisonBasis,
     repairs: &[EncounterRepair],
 ) -> Result<usize, StoreError> {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
     check_dataset(&tx, dataset)?;
-    check_content_revision(&tx, content_revision)?;
+    check_comparison_basis(&tx, basis)?;
     let mut changed = 0;
     for repair in repairs {
         let key = &repair.key;

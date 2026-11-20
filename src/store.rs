@@ -46,22 +46,6 @@ pub struct RepertoireDocument {
     pub model_authority: crate::ModelAuthority,
 }
 
-/// Dataset-local participation in Daily Study and current game comparisons.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RepertoireActivity {
-    #[default]
-    Active,
-    Suspended,
-}
-
-pub enum RepertoireActivityResult {
-    Applied,
-    StaleDataset,
-    UnknownRepertoire,
-    CommandConflict,
-}
-
 /// The same command may be delivered again without changing newer learning.
 pub enum RepertoireReset {
     Applied(Vec<TargetId>),
@@ -176,15 +160,22 @@ pub trait Store {
         Err(StoreError::Unsupported("repertoire_introductions"))
     }
 
-    /// Set participation, stop its unfinished Study attempt, and record the command atomically.
-    /// Delivering an accepted command again returns Applied without changing newer state.
+    /// Read a prior receipt or the current addressed attempt and write revision.
+    fn repertoire_activity(
+        &self,
+        _command: &crate::RepertoireActivityCommand<'_>,
+    ) -> Result<crate::RepertoireActivityRead, StoreError> {
+        Err(StoreError::Unsupported("repertoire_activity"))
+    }
+
+    /// Save participation and any supplied Study abandonment in the same transaction.
+    /// A matching prior receipt settles the command before checking the write revision.
     fn set_repertoire_activity(
         &mut self,
-        _dataset: &DatasetId,
-        _repertoire: &str,
-        _command_id: &str,
-        _activity: RepertoireActivity,
-    ) -> Result<RepertoireActivityResult, StoreError> {
+        _command: &crate::RepertoireActivityCommand<'_>,
+        _expected_revision: Revision,
+        _abandoned: Option<crate::ChessAttempt>,
+    ) -> Result<crate::RepertoireActivityResult, StoreError> {
         Err(StoreError::Unsupported("set_repertoire_activity"))
     }
 
@@ -337,7 +328,7 @@ pub trait Store {
     fn repair_choice_encounters(
         &mut self,
         _dataset: &DatasetId,
-        _content_revision: Revision,
+        _basis: crate::GameComparisonBasis,
         _repairs: &[crate::EncounterRepair],
     ) -> Result<usize, StoreError> {
         Err(StoreError::Unsupported("repair_choice_encounters"))
@@ -421,8 +412,12 @@ pub trait Store {
         Err(StoreError::Unsupported("game_relevance"))
     }
 
-    fn game_content_revision(&self, _dataset: &DatasetId) -> Result<Option<Revision>, StoreError> {
-        Err(StoreError::Unsupported("game_content_revision"))
+    /// The current basis for cached Games comparisons, fenced to the dataset.
+    fn game_comparison_basis(
+        &self,
+        _dataset: &DatasetId,
+    ) -> Result<Option<crate::GameComparisonBasis>, StoreError> {
+        Err(StoreError::Unsupported("game_comparison_basis"))
     }
 
     fn opponent_gaps(
