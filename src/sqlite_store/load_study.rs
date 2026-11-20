@@ -12,6 +12,7 @@ pub(super) fn load_study(
     tx: &Transaction<'_>,
     scope: StudyScope<'_>,
 ) -> Result<StudyState, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.load_study.load_study");
     let (dataset, revision, active, policy): (String, Vec<u8>, Option<String>, String) = tx.query_row(
         "SELECT dataset_id, revision, active_attempt_id, policy FROM store_state WHERE singleton=1",
         [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -137,6 +138,7 @@ pub(super) fn load_study(
 // their scope and excluding catalog and dataset writes. The SQL write remains
 // inside the same transaction and enforces uniqueness against off-scope rows.
 pub(super) fn staging_image(state: StudyState) -> Snapshot {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.load_study.staging_image");
     Snapshot {
         known_datasets: BTreeSet::from([state.dataset.clone()]),
         dataset: state.dataset,

@@ -11,6 +11,7 @@ pub(super) fn save_snapshot(
     previous: Option<&Snapshot>,
     next: &Snapshot,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.save_snapshot.save_snapshot");
     save_history(transaction, previous, next)?;
 
     let replace_catalog =
@@ -98,6 +99,7 @@ fn save_history(
     previous: Option<&Snapshot>,
     next: &Snapshot,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.save_snapshot.save_history");
     for dataset in &next.known_datasets {
         if previous.is_none_or(|old| !old.known_datasets.contains(dataset)) {
             transaction
@@ -124,6 +126,7 @@ fn save_history(
 }
 
 fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.save_snapshot.save_catalog");
     transaction
         .execute_batch(
             "DELETE FROM line_targets;
@@ -183,6 +186,7 @@ fn save_outcomes(
     previous: Option<&Snapshot>,
     next: &Snapshot,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.save_snapshot.save_outcomes");
     let assessment_count = previous.map_or(0, |old| old.assessments.len());
     for record in next.assessments.iter().skip(assessment_count) {
         let (attempt, provider, event) = match &record.key {

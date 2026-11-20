@@ -9,6 +9,7 @@ impl SqliteStore {
         &self,
         query: TacticPageQuery<'_>,
     ) -> Result<TacticPage, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.tactic_page.read_tactic_page");
         let mut statement = self
             .connection
             .prepare_cached(

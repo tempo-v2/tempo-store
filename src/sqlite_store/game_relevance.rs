@@ -16,6 +16,7 @@ pub(super) fn save_facts(
     compared: &ComparedGame,
     evidence: &ComparedRelevance,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.save_facts");
     let game = &compared.game;
     let learner = &compared.summary.learner;
     if let Some(occurred) = game
@@ -75,6 +76,8 @@ fn replace_encounters(
     learner: &str,
     encounters: &GameEncounters,
 ) -> Result<(), StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_relevance.replace_encounters");
     tx.execute(
         "DELETE FROM game_encounters AS encounter
          WHERE (dataset_id,source,game_id,learner)=(?1,?2,?3,?4)
@@ -109,6 +112,8 @@ pub(super) fn choice_encounter_keys(
     dataset: &DatasetId,
     after: Option<&EncounterKey>,
 ) -> Result<Vec<EncounterKey>, StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_relevance.choice_encounter_keys");
     let cursor = after.map(|key| {
         (
             key.source.as_str(),
@@ -140,6 +145,8 @@ pub(super) fn check_content_revision(
     db: &Connection,
     expected: Revision,
 ) -> Result<(), StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_relevance.check_content_revision");
     let revision: u64 = db
         .query_row(
             "SELECT content_revision FROM store_state WHERE singleton=1",
@@ -156,6 +163,7 @@ pub(super) fn check_content_revision(
 pub(super) fn comparison_marker(
     db: &Connection,
 ) -> Result<(DatasetId, GameComparisonBasis), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.comparison_marker");
     db.query_row(
         "SELECT state.dataset_id,state.content_revision,coalesce(participation.revision,0)
          FROM store_state AS state LEFT JOIN game_participation_revisions AS participation USING(dataset_id)
@@ -172,6 +180,8 @@ pub(super) fn check_comparison_basis(
     db: &Connection,
     expected: GameComparisonBasis,
 ) -> Result<(), StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_relevance.check_comparison_basis");
     if comparison_marker(db)?.1 != expected {
         return Err(conflict(
             "authoring or participation changed during game comparison",
@@ -186,6 +196,8 @@ pub(super) fn repair_choice_encounters(
     basis: GameComparisonBasis,
     repairs: &[EncounterRepair],
 ) -> Result<usize, StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_relevance.repair_choice_encounters");
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
@@ -245,11 +257,12 @@ pub(super) fn repair_choice_encounters(
     if changed > 0 {
         rebuild(&tx, &dataset.0)?;
     }
-    tx.commit().map_err(database_error)?;
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(changed)
 }
 
 pub(super) fn rebuild(tx: &Transaction<'_>, dataset: &str) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.rebuild");
     tx.execute(
         "DELETE FROM game_target_relevance WHERE dataset_id=?1",
         [dataset],
@@ -282,6 +295,7 @@ pub(super) fn read(
     dataset: &DatasetId,
     model: &str,
 ) -> Result<BTreeMap<TargetId, GameTargetRelevance>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.read");
     let mut query = connection.prepare_cached(
         "WITH modeled AS (
            SELECT reach.target_id,reach.millionths FROM game_model_reach AS reach
@@ -319,6 +333,7 @@ pub(super) fn gaps(
     connection: &Connection,
     dataset: &DatasetId,
 ) -> Result<Vec<GroupedOpponentGap>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.gaps");
     let mut statement = connection
         .prepare_cached(
             "WITH confirmed AS (
@@ -354,10 +369,13 @@ pub(super) fn gaps(
 }
 
 pub(super) fn decode_distribution(value: &str) -> Result<BTreeMap<String, f64>, StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_relevance.decode_distribution");
     row_values::decode(value)
 }
 
 pub(super) fn check_dataset(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.check_dataset");
     let active: String = tx
         .query_row(
             "SELECT dataset_id FROM store_state WHERE singleton=1",
