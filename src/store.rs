@@ -37,12 +37,29 @@ pub enum ContentSource<'a> {
 /// A bounded, consistent read of the active dataset and selected repertoire.
 /// An existing repertoire can lack an authoritative PGN association.
 pub struct RepertoireDocument {
+    pub suspended: bool,
     pub dataset: DatasetId,
     pub revision: Revision,
     pub item: Option<ContentItem>,
     pub pgn: Option<String>,
     pub source_id: Option<String>,
     pub model_authority: crate::ModelAuthority,
+}
+
+/// Dataset-local participation in Daily Study and current game comparisons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepertoireActivity {
+    #[default]
+    Active,
+    Suspended,
+}
+
+pub enum RepertoireActivityResult {
+    Applied,
+    StaleDataset,
+    UnknownRepertoire,
+    CommandConflict,
 }
 
 /// The same command may be delivered again without changing newer learning.
@@ -157,6 +174,18 @@ pub trait Store {
         _positions: &[tempo_chess::PositionKey],
     ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
         Err(StoreError::Unsupported("repertoire_introductions"))
+    }
+
+    /// Set participation, stop its unfinished Study attempt, and record the command atomically.
+    /// Delivering an accepted command again returns Applied without changing newer state.
+    fn set_repertoire_activity(
+        &mut self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+        _command_id: &str,
+        _activity: RepertoireActivity,
+    ) -> Result<RepertoireActivityResult, StoreError> {
+        Err(StoreError::Unsupported("set_repertoire_activity"))
     }
 
     /// Clear one repertoire's Study records and publish its reset receipt atomically.

@@ -153,6 +153,49 @@ fn repertoire_reset_rolls_back_scoped_deletions_when_its_receipt_fails() {
 }
 
 #[test]
+fn repertoire_activity_is_atomic_and_an_old_receipt_cannot_resuspend_it() {
+    use crate::{RepertoireActivity, RepertoireActivityResult};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create(&dir.path().join("suspension.sqlite"), demo_catalog());
+    let issued = issue(&mut store);
+    store.connection.execute_batch(
+        "CREATE TRIGGER reject_activity_receipt BEFORE INSERT ON content_receipts
+         BEGIN SELECT RAISE(ABORT, 'injected activity receipt failure'); END;",
+    ).unwrap();
+    let change = |store: &mut SqliteStore, id, activity| {
+        store.set_repertoire_activity(&issued.dataset, "r1", id, activity)
+    };
+    assert!(change(&mut store, "pause", RepertoireActivity::Suspended).is_err());
+    assert_eq!(store.snapshot().unwrap(), issued);
+    assert_eq!(store.content_state().unwrap().content_revision, Revision(0));
+    assert!(!store.repertoire_document("r1").unwrap().suspended);
+
+    store.connection.execute_batch("DROP TRIGGER reject_activity_receipt").unwrap();
+    assert!(matches!(
+        change(&mut store, "pause", RepertoireActivity::Suspended).unwrap(),
+        RepertoireActivityResult::Applied
+    ));
+    assert!(matches!(
+        change(&mut store, "pause", RepertoireActivity::Active).unwrap(),
+        RepertoireActivityResult::CommandConflict
+    ));
+    assert!(matches!(
+        change(&mut store, "resume", RepertoireActivity::Active).unwrap(),
+        RepertoireActivityResult::Applied
+    ));
+    assert!(matches!(
+        change(&mut store, "pause", RepertoireActivity::Suspended).unwrap(),
+        RepertoireActivityResult::Applied
+    ));
+    assert!(!store.repertoire_document("r1").unwrap().suspended);
+    assert!(matches!(
+        commit(&mut store, &issued, successful_answer_writes(&issued)),
+        Err(StoreError::Conflict(_))
+    ));
+}
+
+#[test]
 fn receipt_trigger_aborts_late_writes_and_the_same_batch_can_retry_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");

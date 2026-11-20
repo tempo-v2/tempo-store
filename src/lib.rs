@@ -42,7 +42,8 @@ pub use receipt_result::ReceiptResult;
 pub use snapshot::Snapshot;
 pub use sqlite_store::SqliteStore;
 pub use store::{
-    ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyScope,
+    ContentReceipt, ContentSource, RepertoireActivity, RepertoireActivityResult,
+    RepertoireDocument, RepertoireReset, Store, StudyScope,
 };
 pub use store_error::StoreError;
 pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, RevealedDecision, StoredAttempt};

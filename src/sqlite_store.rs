@@ -22,6 +22,7 @@ mod game_relevance;
 mod load_snapshot;
 mod load_study;
 mod repertoire_resets;
+mod repertoire_suspensions;
 mod row_values;
 mod saved_reviews;
 mod save_snapshot;
@@ -31,7 +32,8 @@ use save_snapshot::save_snapshot;
 
 pub use game_choices::ChoiceMigrationReport;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
+const REPERTOIRE_SUSPENSIONS_SCHEMA: &str = include_str!("sqlite_store/repertoire_suspensions.sql");
 const SAVED_REVIEWS_SCHEMA: &str = include_str!("sqlite_store/saved_reviews.sql");
 const CORRECTIVE_RELEASE_SCHEMA: &str = include_str!("sqlite_store/corrective_release.sql");
 const GAME_RELEVANCE_SCHEMA: &str = include_str!("sqlite_store/game_relevance.sql");
@@ -139,6 +141,9 @@ impl SqliteStore {
             .execute_batch(SAVED_REVIEWS_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(REPERTOIRE_SUSPENSIONS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -193,6 +198,14 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Read participation for a worker about to dispatch a position shared by multiple books.
+    pub fn suspended_repertoires(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        repertoire_suspensions::read(&self.connection, &dataset.0)
+    }
+
     /// Open an existing database using the current schema. A missing file is an error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = file_path(path.as_ref())?;
@@ -200,7 +213,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=11) {
+        if matches!(schema_version(&connection)?, 2..=12) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -260,7 +273,14 @@ impl SqliteStore {
                     .map_err(database_error)?;
             }
             if schema_version(&tx)? == 11 {
-                tx.execute_batch(SAVED_REVIEWS_SCHEMA).map_err(database_error)?;
+                tx.execute_batch(SAVED_REVIEWS_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 12)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 12 {
+                tx.execute_batch(REPERTOIRE_SUSPENSIONS_SCHEMA)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -338,6 +358,22 @@ impl Store for SqliteStore {
         change: crate::ReviewWrite<'_>,
     ) -> Result<i64, StoreError> {
         saved_reviews::write(&mut self.connection, key, change)
+    }
+
+    fn set_repertoire_activity(
+        &mut self,
+        dataset: &DatasetId,
+        repertoire: &str,
+        command_id: &str,
+        activity: crate::RepertoireActivity,
+    ) -> Result<crate::RepertoireActivityResult, StoreError> {
+        repertoire_suspensions::apply(
+            &mut self.connection,
+            dataset,
+            repertoire,
+            command_id,
+            activity,
+        )
     }
 
     fn reset_repertoire(
@@ -932,14 +968,16 @@ impl Store for SqliteStore {
     }
 
     fn repertoire_document(&self, id: &str) -> Result<RepertoireDocument, StoreError> {
-        let (dataset, revision, item, pgn, source_id, authority):
-            (_, u64, Option<String>, Option<String>, _, Option<String>) = self.connection
+        let (dataset, revision, item, pgn, source_id, authority, suspended):
+            (_, u64, Option<String>, Option<String>, _, Option<String>, bool) = self.connection
             .query_row(
                 "SELECT state.dataset_id, state.content_revision,
                         (SELECT item FROM current_content
                          WHERE dataset_id=state.dataset_id AND repertoire=?1 ORDER BY target_id LIMIT 1),
                         CASE WHEN input.state='unavailable' THEN NULL ELSE source.pgn END,
-                        document.source_id,input.state
+                        document.source_id,input.state,
+                        EXISTS(SELECT 1 FROM repertoire_suspensions
+                            WHERE dataset_id=state.dataset_id AND repertoire_id=?1)
                  FROM store_state AS state
                  LEFT JOIN repertoire_documents AS document
                     ON document.dataset_id=state.dataset_id AND document.repertoire_id=?1
@@ -949,10 +987,11 @@ impl Store for SqliteStore {
                  WHERE state.singleton=1",
                 [id],
                 |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?)),
+                    row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .map_err(database_error)?;
         Ok(RepertoireDocument {
+            suspended,
             dataset: DatasetId(dataset),
             revision: Revision(revision),
             item: item.as_deref().map(row_values::decode).transpose()?,

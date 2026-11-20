@@ -1,6 +1,6 @@
 //! Consistent inputs for current catalog changes.
 use crate::{Snapshot, StoreError, StoredAttempt, StudyScope, StudyState};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tempo_chess::Catalog;
 use tempo_learning::LearningState;
 use tempo_types::{AttemptId, DatasetId, Revision, TargetId};
@@ -12,6 +12,7 @@ pub struct ContentState {
     pub dataset: DatasetId,
     pub revision: Revision,
     pub content_revision: Revision,
+    pub suspended_repertoires: BTreeSet<String>,
     pub catalog: Catalog,
     pub learning: BTreeMap<TargetId, LearningState>,
     pub active_attempt: Option<AttemptId>,
@@ -40,6 +41,7 @@ impl ContentState {
             dataset: state.dataset,
             revision: state.revision,
             content_revision,
+            suspended_repertoires: state.suspended_repertoires,
             catalog: state.catalog,
             learning: state.learning,
             active_attempt: state.active_attempt,
