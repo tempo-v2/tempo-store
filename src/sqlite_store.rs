@@ -712,6 +712,15 @@ impl Store for SqliteStore {
         )
     }
 
+    fn game_library(
+        &self,
+        dataset: &DatasetId,
+        through: Option<i64>,
+        before: Option<i64>,
+    ) -> Result<crate::GameLibraryPage, StoreError> {
+        self.read_game_library(dataset, through, before)
+    }
+
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
         self.read_game_history()
     }
@@ -914,6 +923,44 @@ impl Store for SqliteStore {
                 _ => crate::ModelAuthority::Unavailable,
             },
         })
+    }
+
+    fn repertoire_introductions(
+        &self,
+        dataset: &DatasetId,
+        revision: Revision,
+        repertoire: &str,
+        positions: &[tempo_chess::PositionKey],
+    ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
+        let tx = self.connection.unchecked_transaction().map_err(database_error)?;
+        let current: Option<u64> = tx.query_row(
+            "SELECT content_revision FROM store_state WHERE singleton=1 AND dataset_id=?1",
+            [&dataset.0], |row| row.get(0)
+        ).optional().map_err(database_error)?;
+        if current != Some(revision.0) {
+            return Err(conflict("The repertoire changed while reading the game."));
+        }
+        let mut facts = std::collections::BTreeMap::new();
+        let mut stmt = tx.prepare_cached(
+            "SELECT c.item,l.state FROM current_content AS c JOIN learning AS l USING(target_id)
+             WHERE c.dataset_id=?1 AND c.repertoire=?2 AND c.position=?3"
+        ).map_err(database_error)?;
+        for position in positions {
+            let row: Option<(String, String)> = stmt
+                .query_row(params![dataset.0, repertoire, position.0], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()
+                .map_err(database_error)?;
+            if let Some((item, state)) = row {
+                let item: ContentItem = row_values::decode(&item)?;
+                if item.active() {
+                    let learning: LearningState = row_values::decode(&state)?;
+                    facts.insert(position.clone(), learning.introduced);
+                }
+            }
+        }
+        Ok(facts)
     }
 
     fn content_receipt(&self, request: &str) -> Result<Option<String>, StoreError> {
