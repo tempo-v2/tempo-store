@@ -550,3 +550,50 @@ fn scoped_read_distinguishes_unloaded_absent_and_present_targets() {
     assert_eq!(content.revision, issued.revision);
     assert_eq!(content.content_revision, Revision(0));
 }
+
+#[test]
+fn study_lead_in_backfill_only_changes_current_metadata_and_rejects_stale_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("study.sqlite");
+    let mut store = create(&path, demo_catalog());
+    let before = issue(&mut store);
+    let readonly = SqliteStore::open_read_only(&path).unwrap();
+    let content_revision = readonly.content_state().unwrap().content_revision;
+    let target = TargetId::from("r1:p2");
+    let initial = tempo_chess::apply_setup_move(tempo_chess::START_FEN, "e2e4").unwrap();
+    let solver = &before.catalog.items[&target].definition.decisions[0].fen;
+    let context = tempo_chess::OpponentLeadIn::verified(&initial, "e7e5", solver).unwrap();
+    let updates = BTreeMap::from([(target.clone(), context.clone())]);
+
+    store
+        .backfill_opponent_lead_ins(&before.dataset, before.revision, &updates)
+        .unwrap();
+    let after = readonly.snapshot().unwrap();
+    assert_eq!(after.learning, before.learning);
+    assert_eq!(after.attempts, before.attempts);
+    assert_eq!(after.active_attempt, before.active_attempt);
+    assert_eq!(after.content_history, before.content_history);
+    assert_eq!(
+        after.catalog.items[&target].opponent_lead_in.as_ref(),
+        Some(&context)
+    );
+    assert_eq!(
+        readonly.content_state().unwrap().content_revision,
+        content_revision
+    );
+    assert!(
+        store
+            .backfill_opponent_lead_ins(&before.dataset, before.revision, &updates)
+            .is_err()
+    );
+    assert!(
+        store
+            .backfill_opponent_lead_ins(&before.dataset, after.revision, &updates)
+            .is_err()
+    );
+    assert_eq!(
+        readonly.snapshot().unwrap(),
+        after,
+        "a failed metadata write must roll back the revision"
+    );
+}

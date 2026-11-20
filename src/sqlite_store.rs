@@ -10,8 +10,8 @@ use crate::{
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
-use std::{path::Path, time::Duration};
-use tempo_chess::{Catalog, ContentItem};
+use std::{collections::BTreeMap, path::Path, time::Duration};
+use tempo_chess::{Catalog, ContentItem, OpponentLeadIn};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
 
@@ -172,6 +172,60 @@ impl SqliteStore {
         rows.collect::<Result<_, _>>().map_err(database_error)
     }
 
+    /// Read one archived PGN referenced by a current content source.
+    pub fn archived_content_pgn(&self, id: &str) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row("SELECT pgn FROM content_sources WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(database_error)
+    }
+
+    /// Backfill verified presentation metadata against the exact catalog read.
+    /// Authored content, issued versions, learning and receipts are independent.
+    pub fn backfill_opponent_lead_ins(
+        &mut self,
+        dataset: &DatasetId,
+        expected: Revision,
+        moves: &BTreeMap<TargetId, OpponentLeadIn>,
+    ) -> Result<(), StoreError> {
+        if moves.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let revision = expected
+            .0
+            .checked_add(1)
+            .ok_or_else(|| invalid("store revision exhausted"))?;
+        let changed = tx.execute(
+            "UPDATE store_state SET revision=?1 WHERE singleton=1 AND dataset_id=?2 AND revision=?3",
+            params![revision.to_be_bytes().as_slice(), dataset.0, expected.0.to_be_bytes().as_slice()],
+        ).map_err(database_error)?;
+        if changed != 1 {
+            return Err(conflict("snapshot changed; reload before retrying"));
+        }
+        {
+            let mut insert = tx.prepare_cached(
+                "UPDATE current_content SET item=json_set(item,'$.opponent_lead_in',json(?1))
+                 WHERE dataset_id=?2 AND target_id=?3 AND json_extract(item,'$.opponent_lead_in') IS NULL",
+            ).map_err(database_error)?;
+            for (target, context) in moves {
+                if insert
+                    .execute(params![row_values::encode(context)?, dataset.0, target.0])
+                    .map_err(database_error)?
+                    != 1
+                {
+                    return Err(conflict("setup context changed; reload before retrying"));
+                }
+            }
+        }
+        tx.commit().map_err(database_error)
+    }
+
     /// Read the local application's persisted settings representation.
     pub fn local_profile(&self) -> Result<Option<String>, StoreError> {
         self.connection
@@ -204,6 +258,27 @@ impl SqliteStore {
         dataset: &DatasetId,
     ) -> Result<std::collections::BTreeSet<String>, StoreError> {
         repertoire_suspensions::read(&self.connection, &dataset.0)
+    }
+
+    /// Inspect the current schema without creating or migrating a database.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let connection = Connection::open_with_flags(
+            file_path(path.as_ref())?,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(database_error)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(database_error)?;
+        if schema_version(&connection)? != SCHEMA_VERSION {
+            return Err(invalid(
+                "read-only inspection requires the current Store schema",
+            ));
+        }
+        Ok(Self {
+            connection,
+            choice_migration: None,
+        })
     }
 
     /// Open an existing database using the current schema. A missing file is an error.
