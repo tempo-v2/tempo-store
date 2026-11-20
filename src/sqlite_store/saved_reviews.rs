@@ -28,6 +28,7 @@ pub(super) fn page(
     dataset: &DatasetId,
     before: Option<i64>,
 ) -> Result<Vec<SavedReview>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.saved_reviews.page");
     let tx = connection.unchecked_transaction().map_err(database_error)?;
     check_dataset(&tx, dataset)?;
     read_selected(
@@ -52,6 +53,7 @@ pub(super) fn context(
     dataset: &DatasetId,
     id: i64,
 ) -> Result<Option<SavedReviewContext>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.saved_reviews.context");
     let tx = connection.unchecked_transaction().map_err(database_error)?;
     check_dataset(&tx, dataset)?;
     let rows: Vec<SavedReviewContext> = read_selected(
@@ -108,6 +110,7 @@ pub(super) fn receipt(
     connection: &Connection,
     key: &ReviewCommandKey<'_>,
 ) -> Result<Option<i64>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.saved_reviews.receipt");
     let saved: Option<(String, i64)> = connection
         .query_row(
             "SELECT fingerprint, review_id FROM saved_review_receipts
@@ -131,9 +134,11 @@ pub(super) fn write(
     key: &ReviewCommandKey<'_>,
     change: ReviewWrite<'_>,
 ) -> Result<i64, StoreError> {
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(database_error)?;
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.saved_reviews.write");
+    let tx = crate::diagnostics::timed("sqlite.begin", || {
+        connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    })
+    .map_err(database_error)?;
     check_dataset(&tx, key.dataset)?;
     if let Some(id) = receipt(&tx, key)? {
         return Ok(id);
@@ -196,6 +201,6 @@ pub(super) fn write(
         params![key.dataset.0, key.submission, key.fingerprint, id],
     )
     .map_err(database_error)?;
-    tx.commit().map_err(database_error)?;
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(id)
 }

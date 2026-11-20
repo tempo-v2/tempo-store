@@ -4,6 +4,17 @@ Store is Tempo's typed persistence boundary. `MemoryStore` publishes atomic chan
 in process memory. `SqliteStore` commits the same typed batches to a local SQLite
 file. The application composes transactions and passes domain components values.
 
+## Storage diagnostics
+
+SQLite operation boundaries, transaction acquisition/commit and stable SQLite
+error codes emit structured events through the standard `log` facade under the
+`tempo_store::diagnostics` target. Store does not configure a logger, open log
+files or depend on the Tempo host. The serving application supplies the bounded
+sink, request context and watchdog. No SQL text, bound parameters, database paths,
+stored content or receipt payloads are logged. Events are observations; existing
+constraints, transaction outcomes, error types and the five-second busy timeout
+remain authoritative. See the application's [diagnostic guide](https://github.com/tempo-v2/tempo/blob/feat/runtime-diagnostics/DIAGNOSTICS.md).
+
 ## Read the boundary in this order
 
 | Concept | What it means | What it does not do |

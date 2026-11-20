@@ -84,6 +84,7 @@ impl SqliteStore {
         catalog: Catalog,
         policy: SchedulerSettings,
     ) -> Result<Self, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.create");
         Self::create_with_profile(path, dataset, catalog, policy, None)
     }
 
@@ -95,6 +96,8 @@ impl SqliteStore {
         policy: SchedulerSettings,
         profile: Option<&str>,
     ) -> Result<Self, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.create_with_profile");
         let path = file_path(path.as_ref())?;
         let initial = initial_snapshot(dataset, catalog, policy)?;
         let mut connection = Connection::open_with_flags(
@@ -103,9 +106,10 @@ impl SqliteStore {
         )
         .map_err(database_error)?;
         configure(&connection)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
+            connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         let objects: i64 = transaction
             .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
             .map_err(database_error)?;
@@ -162,7 +166,8 @@ impl SqliteStore {
                 [profile],
             )
             .map_err(database_error)?;
-        transaction.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
         Ok(Self {
             connection,
             choice_migration: None,
@@ -171,6 +176,8 @@ impl SqliteStore {
 
     /// List saved content sources for local provenance reconciliation.
     pub fn content_source_ids(&self) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.content_source_ids");
         let mut query = self
             .connection
             .prepare("SELECT id FROM content_sources")
@@ -256,6 +263,7 @@ impl SqliteStore {
 
     /// Read the local application's persisted settings representation.
     pub fn local_profile(&self) -> Result<Option<String>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.local_profile");
         self.connection
             .query_row(
                 "SELECT local_profile FROM store_state WHERE singleton=1",
@@ -267,6 +275,8 @@ impl SqliteStore {
 
     /// Replace settings if another editor has not changed the profile in the meantime.
     pub fn update_local_profile(&self, expected: &str, profile: &str) -> Result<(), StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.update_local_profile");
         let changed = self
             .connection
             .execute(
@@ -285,6 +295,8 @@ impl SqliteStore {
         &self,
         dataset: &DatasetId,
     ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.suspended_repertoires");
         repertoire_suspensions::read(&self.connection, &dataset.0)
     }
 
@@ -311,15 +323,17 @@ impl SqliteStore {
 
     /// Open an existing database using the current schema. A missing file is an error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.open");
         let path = file_path(path.as_ref())?;
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
         if matches!(schema_version(&connection)?, 2..=14) {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(database_error)?;
+            let tx = crate::diagnostics::timed("sqlite.begin", || {
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)
+            })
+            .map_err(database_error)?;
             if schema_version(&tx)? == 2 {
                 tx.execute_batch(DAILY_ALLOWANCE_SCHEMA)
                     .map_err(database_error)?;
@@ -399,7 +413,7 @@ impl SqliteStore {
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
-            tx.commit().map_err(database_error)?;
+            crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         }
         let version = schema_version(&connection)?;
         if version != SCHEMA_VERSION {
@@ -417,6 +431,8 @@ impl SqliteStore {
 
     /// Counts for an upgrade performed by this opening of the database.
     pub fn choice_migration_report(&self) -> Option<&ChoiceMigrationReport> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.choice_migration_report");
         self.choice_migration.as_ref()
     }
 
@@ -424,6 +440,8 @@ impl SqliteStore {
     pub fn game_comparison_marker(
         &self,
     ) -> Result<(DatasetId, crate::GameComparisonBasis), StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.game_comparison_marker");
         game_relevance::comparison_marker(&self.connection)
     }
 
@@ -433,6 +451,8 @@ impl SqliteStore {
         dataset: &DatasetId,
         scope: crate::ProjectionScope,
     ) -> Result<Vec<crate::ProjectionBook>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.projection_books");
         game_model::books(&self.connection, dataset, scope)
     }
 }
@@ -445,6 +465,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         before: Option<i64>,
     ) -> Result<Vec<crate::SavedReview>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.saved_review_page");
         saved_reviews::page(&self.connection, dataset, before)
     }
 
@@ -453,6 +475,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         id: i64,
     ) -> Result<Option<crate::SavedReviewContext>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.saved_review_context");
         saved_reviews::context(&self.connection, dataset, id)
     }
 
@@ -460,6 +484,8 @@ impl Store for SqliteStore {
         &self,
         key: &crate::ReviewCommandKey<'_>,
     ) -> Result<Option<i64>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.saved_review_receipt");
         saved_reviews::receipt(&self.connection, key)
     }
 
@@ -468,6 +494,8 @@ impl Store for SqliteStore {
         key: &crate::ReviewCommandKey<'_>,
         change: crate::ReviewWrite<'_>,
     ) -> Result<i64, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.write_saved_review");
         saved_reviews::write(&mut self.connection, key, change)
     }
 
@@ -475,6 +503,8 @@ impl Store for SqliteStore {
         &self,
         command: &crate::RepertoireActivityCommand<'_>,
     ) -> Result<crate::RepertoireActivityRead, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_activity");
         repertoire_suspensions::context(&self.connection, command)
     }
 
@@ -484,6 +514,8 @@ impl Store for SqliteStore {
         expected_revision: Revision,
         abandoned: Option<crate::ChessAttempt>,
     ) -> Result<crate::RepertoireActivityResult, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.set_repertoire_activity");
         repertoire_suspensions::apply(&mut self.connection, command, expected_revision, abandoned)
     }
 
@@ -580,6 +612,8 @@ impl Store for SqliteStore {
         at_ms: u64,
         fresh: &LearningState,
     ) -> Result<RepertoireReset, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.reset_repertoire");
         repertoire_resets::apply(
             &mut self.connection,
             dataset,
@@ -595,6 +629,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         repertoire: &str,
     ) -> Result<Option<u64>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_reset_at");
         self.connection.query_row(
             "SELECT max(reset_at_ms) FROM (
                 SELECT reset_at_ms FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2
@@ -611,6 +647,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         repertoire: &str,
     ) -> Result<u64, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_reset_generation");
         self.connection
             .query_row(
                 "SELECT count(*) FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2",
@@ -627,6 +665,7 @@ impl Store for SqliteStore {
         successful_refresh_ms: Option<u64>,
         receipt: crate::GameReceipt<'_>,
     ) -> Result<crate::AcceptedGames, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_games");
         self.save_game_evidence(commit, games, successful_refresh_ms, receipt)
     }
 
@@ -636,6 +675,7 @@ impl Store for SqliteStore {
         id: &str,
         fingerprint: &str,
     ) -> Result<Option<crate::AcceptedGames>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_receipt");
         self.read_game_receipt(dataset, id, fingerprint)
     }
 
@@ -644,6 +684,7 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         id: &str,
     ) -> Result<Option<crate::PgnTiming>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.pgn_timing");
         game_evidence::read_pgn_timing(&self.connection, &dataset.0, id)
     }
 
@@ -653,6 +694,7 @@ impl Store for SqliteStore {
         url: &str,
         signature: &str,
     ) -> Result<Option<crate::GameRecord>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.verified_game");
         self.read_verified_game(dataset, url, signature)
     }
 
@@ -662,8 +704,12 @@ impl Store for SqliteStore {
         target: &TargetId,
         version: ContentVersion,
     ) -> Result<Vec<crate::LegacyGameMiss>, StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.legacy_game_misses");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         row_values::read_selected(&tx,
             "SELECT DISTINCT game.source,game.id,json_extract(comparison.summary,'$.learner'),observation.ply,game.start_ms,game.end_ms
              FROM game_observations AS observation
@@ -686,6 +732,7 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         id: &str,
     ) -> Result<Option<crate::GameSummary>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_comparison");
         let saved: Option<String> = self
             .connection
             .query_row(
@@ -704,6 +751,7 @@ impl Store for SqliteStore {
         source: &str,
         game_id: &str,
     ) -> Result<crate::GameChoices, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_choices");
         game_choices::read(&self.connection, dataset, source, game_id)
     }
 
@@ -712,6 +760,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         after: Option<&crate::EncounterKey>,
     ) -> Result<Vec<crate::EncounterKey>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.choice_encounter_keys");
         game_relevance::choice_encounter_keys(&self.connection, dataset, after)
     }
 
@@ -721,6 +771,8 @@ impl Store for SqliteStore {
         basis: crate::GameComparisonBasis,
         repairs: &[crate::EncounterRepair],
     ) -> Result<usize, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.repair_choice_encounters");
         game_relevance::repair_choice_encounters(&mut self.connection, dataset, basis, repairs)
     }
 
@@ -729,6 +781,7 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         key: &crate::GameFailureKey,
     ) -> Result<bool, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_failed");
         self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM game_failures WHERE dataset_id=?1 AND source=?2 AND game_id=?3 AND target_id=?4)",
             params![dataset.0, key.source, key.game_id, key.target.0], |row| row.get(0)
@@ -736,17 +789,23 @@ impl Store for SqliteStore {
     }
 
     fn game_failures(&self, dataset: &DatasetId) -> Result<Vec<crate::GameFailureKey>, StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_failures");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         game_evidence::read_game_failures(&tx, dataset)
     }
 
     fn portable_state(&self) -> Result<(Snapshot, crate::PortableGameEvidence), StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.portable_state");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         let snapshot = load_snapshot(&tx)?;
         let evidence = game_evidence::read_portable_evidence(&tx, &snapshot.dataset)?;
-        tx.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         Ok((snapshot, evidence))
     }
 
@@ -756,18 +815,21 @@ impl Store for SqliteStore {
         evidence: &crate::PortableGameEvidence,
         choice_format: crate::PortableChoiceFormat,
     ) -> Result<Revision, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.restore_with_game_evidence");
         if !matches!(commit.writes.as_slice(), [Write::Restore { .. }]) {
             return Err(invalid("portable evidence requires a dataset restore"));
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         let previous = load_snapshot(&tx)?;
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&tx, Some(&previous), &next)?;
         game_evidence::save_portable_evidence(&tx, &next, evidence, choice_format)?;
-        tx.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         Ok(next.revision)
     }
 
@@ -775,8 +837,11 @@ impl Store for SqliteStore {
         &self,
         lookup: crate::CorrectionGameLookup<'_>,
     ) -> Result<Option<crate::CorrectionGame>, StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.correction_game");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         game_evidence::correction_game(&tx, lookup)
     }
 
@@ -786,6 +851,7 @@ impl Store for SqliteStore {
         source: &str,
         id: &str,
     ) -> Result<Option<crate::GameRecord>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.stored_game");
         self.connection.query_row(
             "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms FROM games
              WHERE dataset_id=?1 AND source=?2 AND id=?3",
@@ -799,6 +865,7 @@ impl Store for SqliteStore {
         from: u64,
         to: u64,
     ) -> Result<Vec<crate::GameRecord>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.games_in_window");
         let mut query = self.connection.prepare(
             "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms FROM games
              WHERE dataset_id=?1 AND coalesce(start_ms,end_ms,played_date_ms,fetched_ms)>=?2 AND coalesce(start_ms,end_ms,played_date_ms,fetched_ms)<?3
@@ -818,6 +885,8 @@ impl Store for SqliteStore {
         from: u64,
         to: u64,
     ) -> Result<Vec<crate::GameRecord>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.historical_pgn_window");
         let mut query = self.connection.prepare_cached(
             "SELECT source,id,url,white,black,start_ms,end_ms,fetched_ms,pgn,coalesce(mainline_signature,''),played_date_ms
              FROM games WHERE dataset_id=?1 AND source='pgn' AND (lower(white)=?2) != (lower(black)=?2)
@@ -839,6 +908,7 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         model: &str,
     ) -> Result<std::collections::BTreeMap<TargetId, crate::GameTargetRelevance>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_relevance");
         game_relevance::read(&self.connection, dataset, model)
     }
 
@@ -846,6 +916,8 @@ impl Store for SqliteStore {
         &self,
         dataset: &DatasetId,
     ) -> Result<Option<crate::GameComparisonBasis>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.game_comparison_basis");
         let (current, basis) = self.game_comparison_marker()?;
         Ok((&current == dataset).then_some(basis))
     }
@@ -854,6 +926,7 @@ impl Store for SqliteStore {
         &self,
         dataset: &DatasetId,
     ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.opponent_gaps");
         game_relevance::gaps(&self.connection, dataset)
     }
 
@@ -862,6 +935,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         id: Option<&str>,
     ) -> Result<Option<String>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.game_backfill_state");
         self.connection
             .query_row(
                 "SELECT state FROM game_backfill_jobs WHERE dataset_id=?1 AND (?2 IS NULL OR id=?2)
@@ -880,10 +955,13 @@ impl Store for SqliteStore {
         state: &str,
         accounts_to_recognize: Option<&[(String, String)]>,
     ) -> Result<(), StoreError> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.save_game_backfill_state");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         game_relevance::check_dataset(&tx, dataset)?;
         tx.execute(
             "INSERT INTO game_backfill_jobs VALUES (?1,?2,?3)
@@ -905,7 +983,7 @@ impl Store for SqliteStore {
         if recognition_changed {
             game_relevance::rebuild(&tx, &dataset.0)?;
         }
-        tx.commit().map_err(database_error)
+        crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)
     }
 
     fn game_move_distribution(
@@ -913,6 +991,8 @@ impl Store for SqliteStore {
         model: &str,
         position: &str,
     ) -> Result<Option<std::collections::BTreeMap<String, f64>>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.game_move_distribution");
         let json: Option<String> = self
             .connection
             .query_row(
@@ -933,6 +1013,8 @@ impl Store for SqliteStore {
         position: &str,
         distribution: &std::collections::BTreeMap<String, f64>,
     ) -> Result<(), StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.save_game_move_distribution");
         self.connection.execute(
             "INSERT INTO game_move_models VALUES (?1,?2,?3) ON CONFLICT(model_key,position) DO NOTHING",
             params![model, position, row_values::encode(distribution)?],
@@ -945,6 +1027,8 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         projection: crate::BookProjection<'_>,
     ) -> Result<(), StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.replace_game_model_reach");
         game_model::replace(&mut self.connection, dataset, projection)
     }
 
@@ -952,10 +1036,14 @@ impl Store for SqliteStore {
         &self,
         dataset: &DatasetId,
     ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.game_model_projection_status");
         game_model::status(&self.connection, dataset).map(Some)
     }
 
     fn model_bootstrap_repertoires(&self, dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.model_bootstrap_repertoires");
         game_model::bootstrap_repertoires(&self.connection, dataset)
     }
 
@@ -967,6 +1055,8 @@ impl Store for SqliteStore {
         source_id: &str,
         stamp: Option<&crate::ModelInputStamp>,
     ) -> Result<(), StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.finish_model_bootstrap");
         game_model::finish_bootstrap(
             &mut self.connection,
             dataset,
@@ -983,10 +1073,12 @@ impl Store for SqliteStore {
         through: Option<i64>,
         before: Option<i64>,
     ) -> Result<crate::GameLibraryPage, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_library");
         self.read_game_library(dataset, through, before)
     }
 
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.game_history");
         self.read_game_history()
     }
 
@@ -994,28 +1086,36 @@ impl Store for SqliteStore {
         &self,
         query: crate::TacticPageQuery<'_>,
     ) -> Result<crate::TacticPage, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.tactic_page");
         self.read_tactic_page(query)
     }
 
     fn snapshot(&self) -> Result<Snapshot, StoreError> {
-        let transaction =
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.snapshot");
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-                .map_err(database_error)?;
+        })
+        .map_err(database_error)?;
         let snapshot = load_snapshot(&transaction)?;
-        transaction.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
         Ok(snapshot)
     }
 
     fn study_state(&self, scope: StudyScope<'_>) -> Result<StudyState, StoreError> {
-        let transaction =
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.study_state");
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-                .map_err(database_error)?;
+        })
+        .map_err(database_error)?;
         let state = load_study::load_study(&transaction, scope)?;
-        transaction.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
         Ok(state)
     }
 
     fn stored_attempt(&self, id: &AttemptId) -> Result<Option<StoredAttempt>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.stored_attempt");
         let record: Option<String> = self
             .connection
             .query_row("SELECT record FROM attempts WHERE id=?1", [&id.0], |row| {
@@ -1032,6 +1132,7 @@ impl Store for SqliteStore {
         target: &TargetId,
         version: ContentVersion,
     ) -> Result<Option<ContentItem>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.issued_item");
         let item: Option<String> = self.connection.query_row(
             "SELECT item FROM content_history WHERE dataset_id=?1 AND target_id=?2 AND version=?3",
             params![dataset.0, target.0, version.0.to_be_bytes().as_slice()], |row| row.get(0)
@@ -1040,6 +1141,7 @@ impl Store for SqliteStore {
     }
 
     fn tactics_extra(&self, dataset: &DatasetId, day: StudyDay) -> Result<usize, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.tactics_extra");
         self.connection
             .query_row(
                 "SELECT extra FROM daily_tactics_allowances WHERE dataset_id=?1 AND study_day=?2",
@@ -1059,6 +1161,8 @@ impl Store for SqliteStore {
         increase: usize,
         receipt: &Receipt,
     ) -> Result<(), StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.extend_tactics_allowance");
         if increase == 0
             || receipt.id.0.is_empty()
             || !matches!(receipt.result, ReceiptResult::TacticsAllowance { .. })
@@ -1069,10 +1173,11 @@ impl Store for SqliteStore {
             .0
             .checked_add(1)
             .ok_or_else(|| invalid("store revision exhausted"))?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         let changed = tx
             .execute(
                 "UPDATE store_state SET revision=?1 WHERE singleton=1 AND dataset_id=?2
@@ -1102,13 +1207,16 @@ impl Store for SqliteStore {
             ],
         )
         .map_err(database_error)?;
-        tx.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         Ok(())
     }
 
     fn content_state(&self) -> Result<ContentState, StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.content_state");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         let state = load_study::load_study(
             &tx,
             StudyScope {
@@ -1117,7 +1225,7 @@ impl Store for SqliteStore {
             },
         )?;
         let (_, basis) = game_relevance::comparison_marker(&tx)?;
-        tx.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         ContentState::from_study(state, basis)
     }
 
@@ -1126,6 +1234,7 @@ impl Store for SqliteStore {
         commit: Commit,
         scope: StudyScope<'_>,
     ) -> Result<Revision, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_study");
         if commit
             .writes
             .iter()
@@ -1133,23 +1242,28 @@ impl Store for SqliteStore {
         {
             return Err(invalid("content writes require a content transaction"));
         }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         let state = load_study::load_study(&transaction, scope)?;
         let previous = load_study::staging_image(state);
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&transaction, Some(&previous), &next)?;
-        transaction.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
         Ok(next.revision)
     }
 
     fn commit(&mut self, commit: Commit) -> Result<Revision, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit");
         self.commit_content(commit, None, None)
     }
 
     fn repertoire_document(&self, id: &str) -> Result<RepertoireDocument, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_document");
         let (dataset, revision, item, pgn, source_id, authority, suspended):
             (_, u64, Option<String>, Option<String>, _, Option<String>, bool) = self.connection
             .query_row(
@@ -1194,6 +1308,8 @@ impl Store for SqliteStore {
         repertoire: &str,
         positions: &[tempo_chess::PositionKey],
     ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_introductions");
         let tx = self
             .connection
             .unchecked_transaction()
@@ -1236,6 +1352,7 @@ impl Store for SqliteStore {
     }
 
     fn content_receipt(&self, request: &str) -> Result<Option<String>, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.content_receipt");
         self.connection
             .query_row(
                 "SELECT reply FROM content_receipts WHERE request=?1",
@@ -1252,10 +1369,12 @@ impl Store for SqliteStore {
         source: Option<ContentSource<'_>>,
         receipt: Option<ContentReceipt<'_>>,
     ) -> Result<Revision, StoreError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_content");
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         let dataset = commit.expected_dataset.clone();
         if let Some(ContentSource::RepertoireDocument {
             expected_content_revision,
@@ -1359,7 +1478,8 @@ impl Store for SqliteStore {
                 )
                 .map_err(database_error)?;
         }
-        transaction.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
         Ok(revision)
     }
 }
@@ -1372,6 +1492,7 @@ fn file_path(path: &Path) -> Result<&Path, StoreError> {
 }
 
 fn configure(connection: &Connection) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.configure");
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(database_error)?;
@@ -1387,6 +1508,7 @@ fn schema_version(connection: &Connection) -> Result<i64, StoreError> {
 }
 
 fn database_error(error: rusqlite::Error) -> StoreError {
+    crate::diagnostics::sqlite_error(&error);
     StoreError::Unavailable(format!("SQLite store: {error}"))
 }
 

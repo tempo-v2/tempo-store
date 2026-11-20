@@ -15,6 +15,7 @@ pub(super) fn catalog_changed(
     previous: &Catalog,
     next: &Catalog,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.catalog_changed");
     let repertoires: Vec<String> = row_values::read_selected(
         tx,
         "SELECT repertoire_id FROM game_model_inputs WHERE dataset_id=?1 AND state<>'unavailable'",
@@ -59,6 +60,7 @@ pub(super) fn set_verified(
     repertoire: &str,
     stamp: &ModelInputStamp,
 ) -> Result<bool, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.set_verified");
     if stamp.key.is_empty() || stamp.targets != staged_targets(tx, dataset, repertoire)? {
         return Err(invalid("model input does not match the staged repertoire"));
     }
@@ -75,6 +77,7 @@ pub(super) fn bootstrap_repertoires(
     db: &Connection,
     dataset: &DatasetId,
 ) -> Result<Vec<String>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.bootstrap_repertoires");
     row_values::read_selected(
         db,
         "SELECT repertoire_id FROM game_model_inputs AS input WHERE dataset_id=?1 AND state='needs_bootstrap'
@@ -94,6 +97,7 @@ pub(super) fn finish_bootstrap(
     source_id: &str,
     stamp: Option<&ModelInputStamp>,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.finish_bootstrap");
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
@@ -117,7 +121,7 @@ pub(super) fn finish_bootstrap(
             params![dataset.0, repertoire],
         ).map_err(database_error)?;
     }
-    tx.commit().map_err(database_error)
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)
 }
 
 pub(super) fn books(
@@ -125,6 +129,7 @@ pub(super) fn books(
     dataset: &DatasetId,
     scope: ProjectionScope,
 ) -> Result<Vec<ProjectionBook>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.books");
     let tx =
         Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(database_error)?;
     game_relevance::check_dataset(&tx, dataset)?;
@@ -167,11 +172,12 @@ pub(super) fn books(
             })
         })
         .collect::<Result<_, StoreError>>()?;
-    tx.commit().map_err(database_error)?;
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(books)
 }
 
 pub(super) fn status(db: &Connection, dataset: &DatasetId) -> Result<ProjectionStatus, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.status");
     db.query_row(
         "WITH active_books AS (
            SELECT DISTINCT repertoire AS repertoire_id FROM current_content
@@ -204,6 +210,7 @@ pub(super) fn replace(
     dataset: &DatasetId,
     projection: BookProjection<'_>,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.replace");
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
@@ -274,5 +281,5 @@ pub(super) fn replace(
             params![dataset.0, projection.repertoire_id, projection.model, projection.input_key, target.0, millionths],
         ).map_err(database_error)?;
     }
-    tx.commit().map_err(database_error)
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)
 }

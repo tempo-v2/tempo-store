@@ -24,6 +24,7 @@ mod store;
 mod store_error;
 mod tactic_page;
 pub use tactic_page::{TACTIC_PAGE_SIZE, TacticFilter, TacticListRow, TacticPage, TacticPageQuery};
+mod diagnostics;
 mod stored_attempt;
 mod transaction;
 mod write;
