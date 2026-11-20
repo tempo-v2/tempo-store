@@ -33,10 +33,18 @@ fn active(connection: &Connection, dataset: &DatasetId) -> Result<(), StoreError
 fn status_name(status: TacticalAnalysisStatus) -> &'static str {
     match status {
         TacticalAnalysisStatus::Complete => "complete",
+        TacticalAnalysisStatus::Inconclusive => "inconclusive",
         TacticalAnalysisStatus::Failed => "failed",
         TacticalAnalysisStatus::TimedOut => "timed_out",
         TacticalAnalysisStatus::Unsupported => "unsupported",
     }
+}
+
+fn has_position_findings(status: TacticalAnalysisStatus) -> bool {
+    matches!(
+        status,
+        TacticalAnalysisStatus::Complete | TacticalAnalysisStatus::Inconclusive
+    )
 }
 
 pub(super) fn accept(
@@ -63,7 +71,7 @@ pub(super) fn accept(
             "expected an addressed tactical analysis and content/learning writes",
         ));
     }
-    if analysis.status != TacticalAnalysisStatus::Complete
+    if !has_position_findings(analysis.status)
         && (!analysis.observations.is_empty()
             || !commit.writes.is_empty()
             || analysis.decisions_scanned != 0)
@@ -76,7 +84,7 @@ pub(super) fn accept(
     for observation in &analysis.observations {
         if observation.motif.is_empty()
             || observation.outcome.is_empty()
-            || !keys.insert((observation.ply, &observation.motif))
+            || !keys.insert((observation.ply, &observation.motif, &observation.producer))
             || !serde_json::from_str::<serde_json::Value>(&observation.details_json)
                 .is_ok_and(|value| value.is_object())
         {
@@ -146,13 +154,29 @@ pub(super) fn accept(
         ));
     }
     if let Some(run) = analysis.position {
+        let analyses: String = tx
+            .query_row(
+                "SELECT analyses FROM tactical_positions WHERE id=?1",
+                [run.id],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        let members: Vec<tempo_chess::DetectorIdentity> = decode(&analyses)?;
+        if analysis.observations.iter().any(|row| {
+            row.producer
+                .as_ref()
+                .is_none_or(|producer| !members.contains(producer))
+        }) {
+            return Err(invalid(
+                "result producer is outside the queued analysis set",
+            ));
+        }
         let changed = tx.execute(
             "UPDATE tactical_positions SET status=?1 WHERE id=?2 AND deeper=?3 AND ply=?4
                 AND status='pending' AND game_fingerprint=?5 AND analysis_version=?6 AND enrollment_id IN (
                     SELECT id FROM tactical_enrollment WHERE dataset_id=?7 AND source=?8 AND game_id=?9 AND learner=?10
                 )",
-            params![if analysis.status == TacticalAnalysisStatus::Complete
-                && !analysis.observations.iter().any(|row| row.outcome == "uncertain") { "complete" } else { "inconclusive" },
+            params![if analysis.status == TacticalAnalysisStatus::Complete { "complete" } else { "inconclusive" },
                 run.id, run.deeper, run.ply, analysis.game_fingerprint, analysis.analysis_version,
                 dataset.0, analysis.source, analysis.game_id, analysis.learner],
         ).map_err(database_error)?;
@@ -187,7 +211,7 @@ pub(super) fn accept(
         new_requests: 0,
         new_request_targets: Vec::new(),
     };
-    if analysis.status == TacticalAnalysisStatus::Complete {
+    if has_position_findings(analysis.status) {
         // Retain audit rows while letting a complete scan replace the current
         // findings, including a changed game under the same detector version.
         tx.execute(
@@ -204,19 +228,24 @@ pub(super) fn accept(
         .map_err(database_error)?;
     }
     for observation in &analysis.observations {
+        let producer_id = observation
+            .producer
+            .as_ref()
+            .map_or(analysis.detector.as_str(), |producer| producer.id.as_str());
+        let producer = observation.producer.as_ref().map(encode).transpose()?;
         let inserted = tx.execute(
             "INSERT INTO tactical_observations(dataset_id,source,game_id,learner,detector,ply,motif,
-                analysis_version,outcome,details_json,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-             ON CONFLICT(dataset_id,source,game_id,learner,detector,ply,motif) DO NOTHING",
+                analysis_version,outcome,details_json,observed_at_ms,producer_id,producer) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(dataset_id,source,game_id,learner,detector,ply,motif,producer_id) DO NOTHING",
             params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.detector,
                 observation.ply,observation.motif,analysis.analysis_version,observation.outcome,
-                observation.details_json,analysis.analyzed_at_ms]
+                observation.details_json,analysis.analyzed_at_ms,producer_id,producer]
         ).map_err(database_error)?;
         acceptance.new_observations += inserted;
         let id: u64 = tx
             .query_row(
                 "SELECT id FROM tactical_observations WHERE
-             (dataset_id,source,game_id,learner,detector,ply,motif)=(?1,?2,?3,?4,?5,?6,?7)",
+             (dataset_id,source,game_id,learner,detector,ply,motif,producer_id)=(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     dataset.0,
                     analysis.source,
@@ -224,13 +253,13 @@ pub(super) fn accept(
                     analysis.learner,
                     analysis.detector,
                     observation.ply,
-                    observation.motif
+                    observation.motif, producer_id
                 ],
                 |r| r.get(0),
             )
             .map_err(database_error)?;
-        tx.execute("UPDATE tactical_observations SET analysis_version=?2,outcome=?3,details_json=?4,current=1 WHERE id=?1",
-            params![id,analysis.analysis_version,observation.outcome,observation.details_json]).map_err(database_error)?;
+        tx.execute("UPDATE tactical_observations SET analysis_version=?2,outcome=?3,details_json=?4,producer=?5,current=1 WHERE id=?1",
+            params![id,analysis.analysis_version,observation.outcome,observation.details_json,producer]).map_err(database_error)?;
         if let Some(puzzle) = &observation.train {
             let next = next
                 .as_ref()
@@ -282,7 +311,7 @@ pub(super) fn accept(
             .map_err(database_error)?;
         }
     }
-    if analysis.status == TacticalAnalysisStatus::Complete {
+    if has_position_findings(analysis.status) {
         // A complete revised scan can retract an old finding. Failed scans cannot.
         tx.execute(
             "UPDATE tactical_requests SET cancelled=1 WHERE attempt_id IS NULL AND fulfilled=0
@@ -538,12 +567,12 @@ pub(super) fn statistics(
     let mut stats = TacticalStatistics::default();
     let mut query = tx
         .prepare(
-            "SELECT a.status,count(DISTINCT (a.source || char(0) || a.game_id || char(0) || a.learner)),sum(a.decisions_scanned) FROM tactical_analyses a
+            "SELECT CASE WHEN a.status='inconclusive' THEN 'complete' ELSE a.status END AS result,count(DISTINCT (a.source || char(0) || a.game_id || char(0) || a.learner)),sum(a.decisions_scanned) FROM tactical_analyses a
         JOIN games g ON (g.dataset_id,g.source,g.id)=(a.dataset_id,a.source,a.game_id)
         WHERE a.dataset_id=?1 AND a.detector=?2 AND a.analysis_version=?3
           AND (a.position_id=0 OR a.deeper=(SELECT deeper FROM tactical_positions WHERE id=a.position_id))
           AND a.game_fingerprint=coalesce(g.mainline_signature,'')
-          AND (lower(g.white)=a.learner)!=(lower(g.black)=a.learner) GROUP BY a.status",
+          AND (lower(g.white)=a.learner)!=(lower(g.black)=a.learner) GROUP BY result",
         )
         .map_err(database_error)?;
     let rows = query
@@ -620,7 +649,7 @@ pub(super) fn observations(
     active(&tx, dataset)?;
     let limit = limit.clamp(1, 256);
     let mut query=tx.prepare("SELECT o.id,o.source,o.game_id,o.learner,o.detector,o.analysis_version,o.observed_at_ms,
-        o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0)
+        o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0),o.producer
         FROM tactical_observations o LEFT JOIN tactical_requests r ON r.observation_id=o.id
         WHERE o.dataset_id=?1 AND o.detector=?2 AND o.analysis_version=?3 AND o.current=1
           AND (?4 IS NULL OR o.id<?4) ORDER BY o.id DESC LIMIT ?5").map_err(database_error)?;
@@ -649,6 +678,12 @@ pub(super) fn observations(
             analysis_version: r.get(5).map_err(database_error)?,
             observed_at_ms: r.get(6).map_err(database_error)?,
             observation: TacticalObservation {
+                producer: r
+                    .get::<_, Option<String>>(16)
+                    .map_err(database_error)?
+                    .as_deref()
+                    .map(decode)
+                    .transpose()?,
                 ply: r.get(7).map_err(database_error)?,
                 motif: r.get(8).map_err(database_error)?,
                 outcome: r.get(9).map_err(database_error)?,
@@ -696,19 +731,20 @@ impl SqliteStore {
         dataset: &DatasetId,
         source: &str,
         game: &str,
+        learner: &str,
     ) -> Result<(), StoreError> {
         active(&self.connection, dataset)?;
-        let learner: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT json_extract(summary,'$.learner') FROM game_comparisons
-             WHERE (dataset_id,source,game_id)=(?1,?2,?3) ORDER BY ordinal DESC LIMIT 1",
-                params![dataset.0, source, game],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(database_error)?;
-        let learner = learner.ok_or_else(|| invalid("a verified game participant is required"))?;
+        let learner = learner.trim().to_lowercase();
+        let verified: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM game_comparisons
+             WHERE (dataset_id,source,game_id)=(?1,?2,?3) AND lower(json_extract(summary,'$.learner'))=?4)",
+            params![dataset.0, source, game, learner], |row| row.get(0),
+        ).map_err(database_error)?;
+        if !verified {
+            return Err(invalid(
+                "the selected participant was not verified for this game",
+            ));
+        }
         enroll(&self.connection, dataset, source, game, &learner, false)
     }
 
@@ -732,7 +768,7 @@ impl SqliteStore {
         dataset: &DatasetId,
         game: &TacticalGame,
         version: &str,
-        analyses: &[String],
+        analyses: &[tempo_chess::DetectorIdentity],
         plies: &[u32],
     ) -> Result<(), StoreError> {
         let tx = self

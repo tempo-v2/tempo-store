@@ -8,6 +8,7 @@ use tempo_types::{ContentVersion, Revision, TargetId};
 #[serde(rename_all = "snake_case")]
 pub enum TacticalAnalysisStatus {
     Complete,
+    Inconclusive,
     Failed,
     TimedOut,
     Unsupported,
@@ -24,6 +25,7 @@ pub struct TacticalPuzzleRef {
 /// `train` is the application's explicit instruction to request blind recall.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TacticalObservation {
+    pub producer: Option<tempo_chess::DetectorIdentity>,
     /// Zero-based pre-move timeline occurrence. A custom-FEN first move is 0.
     pub ply: u32,
     pub motif: String,
@@ -131,7 +133,7 @@ pub struct TacticalPositionRun {
 }
 
 pub struct TacticalPositionTask {
-    pub analyses: Vec<String>,
+    pub analyses: Vec<tempo_chess::DetectorIdentity>,
     pub run: TacticalPositionRun,
     pub game: TacticalGame,
 }

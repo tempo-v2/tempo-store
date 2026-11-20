@@ -58,6 +58,7 @@ fn analysis(id: &str, target: Option<&TargetId>) -> TacticalAnalysis {
         error: None,
         observations: target
             .map(|target| TacticalObservation {
+                producer: None,
                 ply: 0,
                 motif: "hanging_material".into(),
                 outcome: "missed_good_capture".into(),
@@ -761,4 +762,97 @@ fn schema_11_migration_is_additive_and_an_interrupted_attempt_rolls_back() {
         SqliteStore::open(&path).unwrap().snapshot().unwrap(),
         before
     );
+}
+
+#[test]
+fn archived_enrollment_keeps_the_selected_verified_participant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(&dir.path().join("study.sqlite"));
+    game(&store, "two-perspectives");
+    store
+        .connection
+        .execute(
+            "INSERT INTO game_comparisons(dataset_id,id,source,game_id,summary)
+         VALUES('dataset','later','pgn','two-perspectives',json_object('learner','black'))",
+            [],
+        )
+        .unwrap();
+    let dataset = DatasetId("dataset".into());
+    assert!(
+        store
+            .queue_game_analysis(&dataset, "pgn", "two-perspectives", "unknown")
+            .is_err()
+    );
+    store
+        .queue_game_analysis(&dataset, "pgn", "two-perspectives", "White")
+        .unwrap();
+    let queued = store
+        .next_analysis_enrollment(&dataset, "v1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.learner, "white");
+}
+
+#[test]
+fn retry_and_attribution_follow_explicit_position_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, _) = fixture(&dir.path().join("study.sqlite"));
+    game(&store, "position");
+    let dataset = DatasetId("dataset".into());
+    let member = tempo_chess::DetectorIdentity {
+        id: "first".into(),
+        revision: "1".into(),
+        configuration_fingerprint: "fixture".into(),
+    };
+    store
+        .queue_game_analysis(&dataset, "pgn", "position", "white")
+        .unwrap();
+    let queued = store
+        .next_analysis_enrollment(&dataset, "v1")
+        .unwrap()
+        .unwrap();
+    store
+        .expand_analysis_enrollment(&dataset, &queued, "v1", &[member.clone()], &[0, 2])
+        .unwrap();
+    let first = store
+        .next_position_analysis(&dataset, "v1", None)
+        .unwrap()
+        .unwrap();
+    let mut result = analysis("position", None);
+    result.position = Some(first.run);
+    let mut obsolete = member.clone();
+    obsolete.revision = "0".into();
+    result.observations.push(TacticalObservation {
+        producer: Some(obsolete),
+        ply: 0,
+        motif: "fixture".into(),
+        outcome: "uncertain".into(),
+        details_json: "{}".into(),
+        train: None,
+    });
+    let revision = store.snapshot().unwrap().revision;
+    let commit = || Commit {
+        expected_dataset: dataset.clone(),
+        expected_revision: revision,
+        writes: vec![],
+    };
+    assert!(store.commit_tactical_analysis(commit(), &result).is_err());
+    result.observations[0].producer = Some(member);
+    store.commit_tactical_analysis(commit(), &result).unwrap();
+    let second = store
+        .next_position_analysis(&dataset, "v1", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.run.ply, 2);
+    result.position = Some(second.run);
+    result.observations.clear();
+    result.status = TacticalAnalysisStatus::Inconclusive;
+    store.commit_tactical_analysis(commit(), &result).unwrap();
+    store.retry_position_analysis(&dataset).unwrap();
+    let retry = store
+        .next_position_analysis(&dataset, "v1", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.run.ply, 2);
+    assert!(retry.run.deeper);
 }
