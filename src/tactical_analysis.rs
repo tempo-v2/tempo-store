@@ -20,6 +20,21 @@ pub struct TacticalPuzzleRef {
     pub version: ContentVersion,
 }
 
+/// Identity of the Study request delivered by the application.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TacticalRequestScope {
+    #[default]
+    Finding,
+    Decision,
+}
+
+impl TacticalRequestScope {
+    fn is_finding(&self) -> bool {
+        *self == Self::Finding
+    }
+}
+
 /// `outcome` and `details_json` are the report's authoritative result, retained
 /// for reporting. Store never interprets them to choose a learning action.
 /// `train` is the application's explicit instruction to request blind recall.
@@ -32,6 +47,8 @@ pub struct TacticalObservation {
     pub outcome: String,
     pub details_json: String,
     pub train: Option<TacticalPuzzleRef>,
+    #[serde(default, skip_serializing_if = "TacticalRequestScope::is_finding")]
+    pub request_scope: TacticalRequestScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,4 +166,50 @@ pub struct AnalysisGameProgress {
     pub pending: u64,
     pub inconclusive: u64,
     pub preparing: bool,
+}
+
+/// Source facts for a verified game. Tempo projects time and learner-relative result.
+pub struct TacticalArchiveGame {
+    pub source: String,
+    pub id: String,
+    pub learner: String,
+    pub white: String,
+    pub pgn: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub fully_analyzed: bool,
+}
+
+/// Small report input. Full engine evidence is loaded only for displayed positions.
+pub struct TacticalDecisionRow {
+    pub id: u64,
+    pub learner: String,
+    pub source: String,
+    pub game_id: String,
+    pub ply: u32,
+    pub position: String,
+    pub outcome: tempo_chess::TacticalOutcome,
+    pub candidates: Vec<(tempo_chess::Motif, String)>,
+    pub accepted: Vec<String>,
+}
+
+/// The currently reportable Study link for a turn, independent of its latest evaluation.
+#[derive(Debug, Serialize)]
+pub struct TacticalTrainingLink {
+    pub id: u64,
+    pub status: TacticalTrainingStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TacticalTrainingStatus {
+    Queued,
+    Issued,
+    Superseded,
+    Reviewed,
+}
+
+pub struct TacticalDecisionDetails {
+    pub evidence_json: String,
+    pub training: Option<TacticalTrainingLink>,
 }

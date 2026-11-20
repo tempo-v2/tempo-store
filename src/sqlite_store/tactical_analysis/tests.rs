@@ -58,6 +58,7 @@ fn analysis(id: &str, target: Option<&TargetId>) -> TacticalAnalysis {
         error: None,
         observations: target
             .map(|target| TacticalObservation {
+                request_scope: TacticalRequestScope::Finding,
                 producer: None,
                 ply: 0,
                 motif: "hanging_material".into(),
@@ -823,6 +824,7 @@ fn retry_and_attribution_follow_explicit_position_contract() {
     let mut obsolete = member.clone();
     obsolete.revision = "0".into();
     result.observations.push(TacticalObservation {
+        request_scope: TacticalRequestScope::Finding,
         producer: Some(obsolete),
         ply: 0,
         motif: "fixture".into(),
@@ -894,5 +896,105 @@ fn retry_and_attribution_follow_explicit_position_contract() {
             .next_position_analysis(&dataset, "v1", None)
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn archive_coverage_uses_the_requested_report_and_accepted_complete_decision_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, _) = fixture(&dir.path().join("study.sqlite"));
+    game(&store, "mixed");
+    let dataset = DatasetId("dataset".into());
+    let member = |id: &str| tempo_chess::DetectorIdentity {
+        id: id.into(),
+        revision: "1".into(),
+        configuration_fingerprint: "fixture".into(),
+    };
+    let legacy = member("capture");
+    let complete = member("whole-turn");
+    store
+        .queue_game_analysis(&dataset, "pgn", "mixed", "white")
+        .unwrap();
+    let queued = store
+        .next_analysis_enrollment(&dataset, "v1")
+        .unwrap()
+        .unwrap();
+    store
+        .expand_analysis_enrollment(
+            &dataset,
+            &queued,
+            "v1",
+            &[legacy.clone(), complete.clone()],
+            &[0],
+        )
+        .unwrap();
+    let position = store
+        .next_position_analysis(&dataset, "v1", None)
+        .unwrap()
+        .unwrap();
+    let mut result = analysis("mixed", None);
+    result.position = Some(position.run);
+    result.status = TacticalAnalysisStatus::Inconclusive;
+    let snapshot = store.snapshot().unwrap();
+    let commit = || Commit {
+        expected_dataset: dataset.clone(),
+        expected_revision: snapshot.revision,
+        writes: vec![],
+    };
+    result.observations = vec![
+        TacticalObservation {
+            producer: Some(legacy),
+            ply: 0,
+            motif: "hanging_material".into(),
+            outcome: "took_good_capture".into(),
+            details_json:
+                r#"{"assessment":{"analysis":{"status":"complete"},"outcome":"took_good_capture"}}"#
+                    .into(),
+            train: None,
+            request_scope: TacticalRequestScope::Finding,
+        },
+        TacticalObservation {
+            producer: Some(complete),
+            ply: 0,
+            motif: PERSONAL_DECISION_KIND.into(),
+            outcome: "uncertain".into(),
+            details_json:
+                r#"{"assessment":{"analysis":{"status":"incomplete"},"outcome":"uncertain"}}"#
+                    .into(),
+            train: None,
+            request_scope: TacticalRequestScope::Decision,
+        },
+    ];
+    store.commit_tactical_analysis(commit(), &result).unwrap();
+    assert!(
+        !store
+            .tactical_archive(&dataset, &result.report, "v1")
+            .unwrap()[0]
+            .fully_analyzed
+    );
+    store.retry_position_analysis(&dataset, "v1").unwrap();
+    result.position = Some(
+        store
+            .next_position_analysis(&dataset, "v1", None)
+            .unwrap()
+            .unwrap()
+            .run,
+    );
+    result.observations[1].outcome = "missed_tactic".into();
+    result.observations[1].details_json =
+        r#"{"assessment":{"analysis":{"status":"complete"},"outcome":"missed_tactic"}}"#.into();
+    // Engine evidence can be complete even when a standalone training check is inconclusive.
+    store.commit_tactical_analysis(commit(), &result).unwrap();
+    assert!(
+        store
+            .tactical_archive(&dataset, &result.report, "v1")
+            .unwrap()[0]
+            .fully_analyzed
+    );
+    assert!(
+        !store
+            .tactical_archive(&dataset, "another-report", "v1")
+            .unwrap()[0]
+            .fully_analyzed
     );
 }
