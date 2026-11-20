@@ -131,7 +131,6 @@ pub(super) fn apply(
         if attempt.status != AttemptStatus::Abandoned
             || attempt.terminal != record.attempt.terminal
             || attempt.state != record.attempt.state
-            || attempt.prompt != record.attempt.prompt
         {
             return Err(invalid(
                 "activity batch requires abandonment without changing the outcome or cursor",
