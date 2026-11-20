@@ -1,4 +1,6 @@
 //! SQL persistence for accepted tactical results and exact occurrence recalls.
+const PERSONAL_DECISION_KIND: &str = tempo_chess::TacticalKind::PersonalTactics.code();
+
 use super::{
     database_error, game_evidence,
     load_snapshot::load_snapshot,
@@ -702,13 +704,14 @@ pub(super) fn statistics(
         .prepare(
             "SELECT outcome,count(*) FROM tactical_observations WHERE
         dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1
-        AND json_type(details_json,'$.assessment.personal') IS NULL GROUP BY outcome",
+        AND motif<>?4 GROUP BY outcome",
         )
         .map_err(database_error)?;
     stats.outcomes = outcomes
-        .query_map(params![dataset.0, report, version], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
-        })
+        .query_map(
+            params![dataset.0, report, version, PERSONAL_DECISION_KIND],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)),
+        )
         .map_err(database_error)?
         .collect::<Result<_, _>>()
         .map_err(database_error)?;
@@ -735,10 +738,17 @@ pub(super) fn observations(
         o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0),o.producer
         FROM tactical_observations o LEFT JOIN tactical_requests r ON r.observation_id=o.id
         WHERE o.dataset_id=?1 AND o.report=?2 AND o.analysis_version=?3 AND o.current=1
-          AND json_type(o.details_json,'$.assessment.personal') IS NULL
+          AND o.motif<>?6
           AND (?4 IS NULL OR o.id<?4) ORDER BY o.id DESC LIMIT ?5").map_err(database_error)?;
     let mut rows = query
-        .query(params![dataset.0, report, version, before, limit + 1])
+        .query(params![
+            dataset.0,
+            report,
+            version,
+            before,
+            limit + 1,
+            PERSONAL_DECISION_KIND
+        ])
         .map_err(database_error)?;
     let mut observations = Vec::new();
     while let Some(r) = rows.next().map_err(database_error)? {
@@ -1034,6 +1044,7 @@ impl SqliteStore {
     pub fn tactical_archive(
         &self,
         dataset: &DatasetId,
+        report: &str,
         version: &str,
     ) -> Result<Vec<TacticalArchiveGame>, StoreError> {
         active(&self.connection, dataset)?;
@@ -1050,9 +1061,9 @@ impl SqliteStore {
                               SELECT 1 FROM tactical_observations o
                               WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.ply,o.analysis_version)
                                    =(e.dataset_id,e.source,e.game_id,e.learner,p.ply,p.analysis_version)
-                                AND o.current=1
+                                AND o.current=1 AND o.report=?3 AND o.motif=?4
                                 AND json_extract(o.details_json,'$.assessment.analysis.status')='complete'
-                                AND json_extract(o.details_json,'$.assessment.outcome')<>'uncertain'
+                                AND o.outcome<>'uncertain'
                           ))
                     ),0)
              FROM latest JOIN game_comparisons c USING(ordinal)
@@ -1063,18 +1074,21 @@ impl SqliteStore {
                    (lower(g.black)=lower(json_extract(c.summary,'$.learner')))"
         ).map_err(database_error)?;
         query
-            .query_map(params![dataset.0, version], |row| {
-                Ok(TacticalArchiveGame {
-                    source: row.get(0)?,
-                    id: row.get(1)?,
-                    learner: row.get(2)?,
-                    white: row.get(3)?,
-                    pgn: row.get(4)?,
-                    start_ms: row.get(5)?,
-                    end_ms: row.get(6)?,
-                    fully_analyzed: row.get(7)?,
-                })
-            })
+            .query_map(
+                params![dataset.0, version, report, PERSONAL_DECISION_KIND],
+                |row| {
+                    Ok(TacticalArchiveGame {
+                        source: row.get(0)?,
+                        id: row.get(1)?,
+                        learner: row.get(2)?,
+                        white: row.get(3)?,
+                        pgn: row.get(4)?,
+                        start_ms: row.get(5)?,
+                        end_ms: row.get(6)?,
+                        fully_analyzed: row.get(7)?,
+                    })
+                },
+            )
             .map_err(database_error)?
             .collect::<Result<_, _>>()
             .map_err(database_error)
@@ -1102,11 +1116,11 @@ impl SqliteStore {
              JOIN game_comparisons c ON c.ordinal=l.ordinal
              WHERE o.dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1
                AND o.learner=lower(json_extract(c.summary,'$.learner'))
-               AND json_type(details_json,'$.assessment.personal')='object'
+               AND o.motif=?4
              ORDER BY o.id DESC"
         ).map_err(database_error)?;
         let mut rows = query
-            .query(params![dataset.0, report, version])
+            .query(params![dataset.0, report, version, PERSONAL_DECISION_KIND])
             .map_err(database_error)?;
         let mut decisions = vec![];
         while let Some(row) = rows.next().map_err(database_error)? {
@@ -1132,10 +1146,10 @@ impl SqliteStore {
         dataset: &DatasetId,
         id: u64,
         version: &str,
-    ) -> Result<Option<(String, Option<u64>, bool)>, StoreError> {
+    ) -> Result<Option<TacticalDecisionDetails>, StoreError> {
         active(&self.connection, dataset)?;
         self.connection.query_row(
-            "SELECT o.details_json,r.id,coalesce(r.fulfilled,0)
+            "SELECT o.details_json,r.id,r.fulfilled,r.cancelled,r.attempt_id IS NOT NULL
              FROM tactical_observations o LEFT JOIN tactical_requests r ON r.id=(
                  SELECT request.id FROM tactical_requests request
                  JOIN tactical_observations basis ON basis.id=request.observation_id
@@ -1144,11 +1158,28 @@ impl SqliteStore {
                        AND (request.cancelled=0 OR request.attempt_id IS NOT NULL)
                  ORDER BY (basis.id=?2) DESC,request.id LIMIT 1)
              WHERE o.dataset_id=?1 AND o.id=?2 AND o.analysis_version=?3 AND o.current=1
-                AND json_type(o.details_json,'$.assessment.personal')='object'
+                AND o.motif=?4
                 AND o.learner=(SELECT lower(json_extract(c.summary,'$.learner')) FROM game_comparisons c
                   WHERE (c.dataset_id,c.source,c.game_id)=(o.dataset_id,o.source,o.game_id)
                   ORDER BY c.ordinal DESC LIMIT 1)",
-            params![dataset.0,id,version], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            params![dataset.0,id,version,PERSONAL_DECISION_KIND], |row| {
+                let training = match row.get::<_, Option<u64>>(1)? {
+                    Some(id) => {
+                        let status = if row.get::<_, bool>(2)? {
+                            TacticalTrainingStatus::Reviewed
+                        } else if row.get::<_, bool>(3)? {
+                            TacticalTrainingStatus::Superseded
+                        } else if row.get::<_, bool>(4)? {
+                            TacticalTrainingStatus::Issued
+                        } else {
+                            TacticalTrainingStatus::Queued
+                        };
+                        Some(TacticalTrainingLink { id, status })
+                    }
+                    None => None,
+                };
+                Ok(TacticalDecisionDetails { evidence_json: row.get(0)?, training })
+            },
         ).optional().map_err(database_error)
     }
 }

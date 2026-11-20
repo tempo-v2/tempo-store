@@ -192,3 +192,24 @@ pub struct TacticalDecisionRow {
     pub candidates: Vec<(tempo_chess::Motif, String)>,
     pub accepted: Vec<String>,
 }
+
+/// The currently reportable Study link for a turn, independent of its latest evaluation.
+#[derive(Debug, Serialize)]
+pub struct TacticalTrainingLink {
+    pub id: u64,
+    pub status: TacticalTrainingStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TacticalTrainingStatus {
+    Queued,
+    Issued,
+    Superseded,
+    Reviewed,
+}
+
+pub struct TacticalDecisionDetails {
+    pub evidence_json: String,
+    pub training: Option<TacticalTrainingLink>,
+}
