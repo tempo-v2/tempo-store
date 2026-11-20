@@ -259,6 +259,23 @@ pub struct GameCommit {
 pub struct GameHistoryEntry {
     pub comparison_id: String,
     pub summary: GameSummary,
+    pub white: String,
+    pub black: String,
+    pub played_date_ms: Option<u64>,
+}
+
+/// One newest comparison per retained game and learner, with its original PGN.
+pub struct GameLibraryEntry {
+    pub ordinal: i64,
+    pub game: GameRecord,
+    pub learner: String,
+    pub repertoires: Vec<RepertoireAdherence>,
+}
+
+pub struct GameLibraryPage {
+    pub through: i64,
+    pub entries: Vec<GameLibraryEntry>,
+    pub next_before: Option<i64>,
 }
 
 #[derive(Default, Debug)]

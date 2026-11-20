@@ -1,7 +1,9 @@
 //! MemoryStore and its usage scenarios.
 
 use crate::transaction::{initial_snapshot, stage_commit};
-use crate::{Commit, Snapshot, Store, StoreError};
+use crate::{
+    Commit, ContentState, PortableGameEvidence, Snapshot, Store, StoreError, StudyScope, StudyState,
+};
 use tempo_chess::Catalog;
 use tempo_learning::SchedulerSettings;
 use tempo_types::{DatasetId, Revision};
@@ -21,6 +23,7 @@ use tempo_types::{DatasetId, Revision};
 /// The staging logic is shared with [`crate::SqliteStore`].
 pub struct MemoryStore {
     state: Snapshot,
+    content_revision: Revision,
     fail_next_commit: bool,
 }
 impl MemoryStore {
@@ -32,6 +35,7 @@ impl MemoryStore {
         Ok(Self {
             state: initial_snapshot(dataset, catalog, policy)?,
             fail_next_commit: false,
+            content_revision: Revision(0),
         })
     }
     /// Fault injection after staging, before publishing, for transaction contract tests.
@@ -44,10 +48,39 @@ impl Store for MemoryStore {
     fn snapshot(&self) -> Result<Snapshot, StoreError> {
         Ok(self.state.clone())
     }
+    fn study_state(&self, scope: StudyScope<'_>) -> Result<StudyState, StoreError> {
+        Ok(StudyState::from_snapshot(&self.state, scope))
+    }
+    fn content_state(&self) -> Result<ContentState, StoreError> {
+        Ok(ContentState::from_snapshot(
+            &self.state,
+            self.content_revision,
+        ))
+    }
+    fn repertoire_reset_at(
+        &self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        // Standalone Study cannot accept reset records through any write.
+        Ok(None)
+    }
+    fn portable_state(&self) -> Result<(Snapshot, PortableGameEvidence), StoreError> {
+        // This adapter cannot accept game evidence, including through restore.
+        Ok((self.state.clone(), PortableGameEvidence::default()))
+    }
     fn commit(&mut self, commit: Commit) -> Result<Revision, StoreError> {
         let staged = stage_commit(&self.state, commit)?;
         if std::mem::take(&mut self.fail_next_commit) {
             return Err(StoreError::Unavailable("injected commit failure".into()));
+        }
+        if self.state.dataset != staged.dataset || self.state.catalog != staged.catalog {
+            self.content_revision = Revision(
+                self.content_revision
+                    .0
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Invalid("content revision exhausted".into()))?,
+            );
         }
         self.state = staged;
         Ok(self.state.revision)

@@ -166,7 +166,17 @@ fn receipt_trigger_aborts_late_writes_and_the_same_batch_can_retry_after_reopen(
          BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;",
         )
         .unwrap();
-    let failure = commit(&mut store, &issued, successful_answer_writes(&issued)).unwrap_err();
+    let id = SubmissionId::from("submission-1");
+    let scope = StudyScope {
+        submission: Some(&id),
+        ..Default::default()
+    };
+    let batch = Commit {
+        expected_revision: issued.revision,
+        expected_dataset: issued.dataset.clone(),
+        writes: successful_answer_writes(&issued),
+    };
+    let failure = store.commit_study(batch.clone(), scope).unwrap_err();
     assert!(
         matches!(failure, StoreError::Unavailable(message) if message.contains("injected receipt failure"))
     );
@@ -179,7 +189,7 @@ fn receipt_trigger_aborts_late_writes_and_the_same_batch_can_retry_after_reopen(
         .execute("DROP TRIGGER reject_completed_receipt", [])
         .unwrap();
     assert_eq!(
-        commit(&mut store, &issued, successful_answer_writes(&issued)),
+        store.commit_study(batch, scope),
         Ok(Revision(issued.revision.0 + 1))
     );
     drop(store);
@@ -423,4 +433,55 @@ fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
         store.content_receipt("request").unwrap().as_deref(),
         Some("{}")
     );
+}
+
+#[test]
+fn scoped_read_distinguishes_unloaded_absent_and_present_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = create(&directory.path().join("scope.sqlite"), demo_catalog());
+    let issued = issue(&mut store);
+    let active = &issued.attempts[issued.active_attempt.as_ref().unwrap()].attempt;
+    let absent = TargetId::from("missing-target");
+    let unloaded = issued
+        .catalog
+        .items
+        .keys()
+        .find(|id| **id != active.target)
+        .unwrap();
+    let read = store
+        .study_state(StudyScope {
+            target: Some(&absent),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(read.attempts.len(), 1);
+    assert_eq!(
+        read.target(&active.target).unwrap(),
+        Some((
+            &issued.catalog.items[&active.target],
+            &issued.learning[&active.target]
+        ))
+    );
+    assert!(read.target(&absent).unwrap().is_none());
+    assert!(read.target(unloaded).is_err());
+    assert!(read.complete_catalog().is_err());
+
+    let complete = store
+        .study_state(StudyScope {
+            catalog: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        complete.complete_catalog().unwrap(),
+        (&issued.catalog, &issued.learning)
+    );
+    assert!(complete.target(unloaded).unwrap().is_some());
+
+    let content = store.content_state().unwrap();
+    assert_eq!(content.catalog, issued.catalog);
+    assert_eq!(content.learning, issued.learning);
+    assert_eq!(content.active_attempt, issued.active_attempt);
+    assert_eq!(content.revision, issued.revision);
+    assert_eq!(content.content_revision, Revision(0));
 }

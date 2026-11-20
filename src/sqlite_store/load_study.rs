@@ -2,7 +2,7 @@
 use super::database_error;
 use super::load_snapshot::load_lines;
 use super::row_values::{decode, decode_counter, read_selected, text_value};
-use crate::{Receipt, Snapshot, StoreError, StoredAttempt, StudyScope};
+use crate::{Receipt, Snapshot, StoreError, StoredAttempt, StudyScope, StudyState, TargetCoverage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::{BTreeMap, BTreeSet};
 use tempo_chess::Catalog;
@@ -11,7 +11,7 @@ use tempo_types::{AttemptId, DatasetId, Revision, TargetId};
 pub(super) fn load_study(
     tx: &Transaction<'_>,
     scope: StudyScope<'_>,
-) -> Result<Snapshot, StoreError> {
+) -> Result<StudyState, StoreError> {
     let (dataset, revision, active, policy): (String, Vec<u8>, Option<String>, String) = tx.query_row(
         "SELECT dataset_id, revision, active_attempt_id, policy FROM store_state WHERE singleton=1",
         [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -76,14 +76,14 @@ pub(super) fn load_study(
         let mut statement = tx.prepare_cached(
             "SELECT item, state FROM current_content JOIN learning USING (target_id) WHERE target_id=?1"
         ).map_err(database_error)?;
-        for target in targets {
+        for target in &targets {
             let row: Option<(String, String)> = statement
-                .query_row([target], |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_row([*target], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()
                 .map_err(database_error)?;
             if let Some((item, state)) = row {
-                items.insert(TargetId(target.clone()), decode(&item)?);
-                learning.insert(TargetId(target.clone()), decode(&state)?);
+                items.insert(TargetId((*target).clone()), decode(&item)?);
+                learning.insert(TargetId((*target).clone()), decode(&state)?);
             }
         }
         (items, learning)
@@ -106,12 +106,17 @@ pub(super) fn load_study(
         )?,
         None => BTreeMap::new(),
     };
-    Ok(Snapshot {
-        dataset: DatasetId(dataset.clone()),
+    let coverage = if scope.catalog {
+        TargetCoverage::Complete
+    } else {
+        TargetCoverage::Selected(targets.into_iter().map(|id| TargetId(id.clone())).collect())
+    };
+    Ok(StudyState {
+        dataset: DatasetId(dataset),
         revision: Revision(decode_counter(revision)?),
         active_attempt: active.map(AttemptId),
         policy: decode(&policy)?,
-        known_datasets: BTreeSet::from([DatasetId(dataset)]),
+        coverage,
         catalog: Catalog {
             items,
             lines: if scope.catalog {
@@ -124,6 +129,24 @@ pub(super) fn load_study(
         attempts,
         assessments,
         receipts,
-        content_history: vec![],
     })
+}
+
+// SQLite Study and Games commits use this private staging image after fixing
+// their scope and excluding catalog and dataset writes. The SQL write remains
+// inside the same transaction and enforces uniqueness against off-scope rows.
+pub(super) fn staging_image(state: StudyState) -> Snapshot {
+    Snapshot {
+        known_datasets: BTreeSet::from([state.dataset.clone()]),
+        dataset: state.dataset,
+        revision: state.revision,
+        policy: state.policy,
+        active_attempt: state.active_attempt,
+        attempts: state.attempts,
+        assessments: state.assessments,
+        receipts: state.receipts,
+        catalog: state.catalog,
+        learning: state.learning,
+        content_history: Vec::new(),
+    }
 }

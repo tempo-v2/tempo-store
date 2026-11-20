@@ -1,6 +1,6 @@
 //! Store and its usage scenarios.
 
-use crate::{Commit, Receipt, Snapshot, StoreError, StoredAttempt, store_error::invalid};
+use crate::{Commit, ContentState, Receipt, Snapshot, StoreError, StoredAttempt, StudyState};
 use tempo_chess::ContentItem;
 use tempo_learning::LearningState;
 use tempo_types::{
@@ -69,8 +69,8 @@ pub trait Store {
     /// Read a consistent owned view without changing stored state.
     fn snapshot(&self) -> Result<Snapshot, StoreError>;
     /// Read current study state with only the referenced outcome/receipt.
-    fn study_state(&self, _scope: StudyScope<'_>) -> Result<Snapshot, StoreError> {
-        self.snapshot()
+    fn study_state(&self, scope: StudyScope<'_>) -> Result<StudyState, StoreError> {
+        Ok(StudyState::from_snapshot(&self.snapshot()?, scope))
     }
 
     /// Publish a study batch checked against the same current-state scope.
@@ -88,7 +88,7 @@ pub trait Store {
         _dataset: &DatasetId,
         _before: Option<i64>,
     ) -> Result<Vec<crate::SavedReview>, StoreError> {
-        Err(invalid("this Store does not support saved Study positions"))
+        Err(StoreError::Unsupported("saved_review_page"))
     }
 
     fn saved_review_context(
@@ -96,14 +96,14 @@ pub trait Store {
         _dataset: &DatasetId,
         _id: i64,
     ) -> Result<Option<crate::SavedReviewContext>, StoreError> {
-        Err(invalid("this Store does not support saved Study positions"))
+        Err(StoreError::Unsupported("saved_review_context"))
     }
 
     fn saved_review_receipt(
         &self,
         _key: &crate::ReviewCommandKey<'_>,
     ) -> Result<Option<i64>, StoreError> {
-        Err(invalid("this Store does not support saved Study positions"))
+        Err(StoreError::Unsupported("saved_review_receipt"))
     }
 
     /// Change only the saved list, with exact command replay in the same transaction.
@@ -112,7 +112,7 @@ pub trait Store {
         _key: &crate::ReviewCommandKey<'_>,
         _change: crate::ReviewWrite<'_>,
     ) -> Result<i64, StoreError> {
-        Err(invalid("this Store does not support saved Study positions"))
+        Err(StoreError::Unsupported("write_saved_review"))
     }
 
     /// Read a page of current tactics and basic learning facts in target order.
@@ -120,13 +120,11 @@ pub trait Store {
         &self,
         _query: crate::TacticPageQuery<'_>,
     ) -> Result<crate::TacticPage, StoreError> {
-        Err(invalid(
-            "this Store does not support bounded tactic browsing",
-        ))
+        Err(StoreError::Unsupported("tactic_page"))
     }
 
     fn tactics_extra(&self, _dataset: &DatasetId, _day: StudyDay) -> Result<usize, StoreError> {
-        Ok(0)
+        Err(StoreError::Unsupported("tactics_extra"))
     }
 
     /// Persist a day-scoped tactics allowance and receipt in one transaction.
@@ -138,19 +136,27 @@ pub trait Store {
         _increase: usize,
         _receipt: &Receipt,
     ) -> Result<(), StoreError> {
-        Err(invalid(
-            "this Store does not support daily tactics allowances",
-        ))
+        Err(StoreError::Unsupported("extend_tactics_allowance"))
     }
 
-    fn content_state(&self) -> Result<(Snapshot, Revision), StoreError> {
-        let state = self.snapshot()?;
-        let revision = state.revision;
-        Ok((state, revision))
+    fn content_state(&self) -> Result<ContentState, StoreError> {
+        Err(StoreError::Unsupported("content_state"))
     }
 
     fn repertoire_document(&self, _id: &str) -> Result<RepertoireDocument, StoreError> {
-        Err(invalid("this Store does not support repertoire documents"))
+        Err(StoreError::Unsupported("repertoire_document"))
+    }
+
+    /// Current-version introduction facts for the addressed game positions in one repertoire.
+    /// An absent entry has no active learning target. Reject a changed content basis.
+    fn repertoire_introductions(
+        &self,
+        _dataset: &DatasetId,
+        _revision: Revision,
+        _repertoire: &str,
+        _positions: &[tempo_chess::PositionKey],
+    ) -> Result<std::collections::BTreeMap<tempo_chess::PositionKey, bool>, StoreError> {
+        Err(StoreError::Unsupported("repertoire_introductions"))
     }
 
     /// Clear one repertoire's Study records and publish its reset receipt atomically.
@@ -162,9 +168,7 @@ pub trait Store {
         _at_ms: u64,
         _fresh: &LearningState,
     ) -> Result<RepertoireReset, StoreError> {
-        Err(invalid(
-            "this Store does not support repertoire progress resets",
-        ))
+        Err(StoreError::Unsupported("reset_repertoire"))
     }
 
     /// Latest reset whose evidence boundary applies to this repertoire.
@@ -173,11 +177,11 @@ pub trait Store {
         _dataset: &DatasetId,
         _repertoire: &str,
     ) -> Result<Option<u64>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("repertoire_reset_at"))
     }
 
     fn content_receipt(&self, _request: &str) -> Result<Option<String>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("content_receipt"))
     }
 
     /// Pin sources, any current repertoire association and the reply atomically.
@@ -185,10 +189,10 @@ pub trait Store {
         &mut self,
         commit: Commit,
         source: Option<ContentSource<'_>>,
-        _receipt: Option<ContentReceipt<'_>>,
+        receipt: Option<ContentReceipt<'_>>,
     ) -> Result<Revision, StoreError> {
-        if matches!(source, Some(ContentSource::RepertoireDocument { .. })) {
-            return Err(invalid("this Store does not support repertoire documents"));
+        if source.is_some() || receipt.is_some() {
+            return Err(StoreError::Unsupported("commit_content"));
         }
         self.commit(commit)
     }
@@ -221,7 +225,7 @@ pub trait Store {
         _dataset: &DatasetId,
         _repertoire: &str,
     ) -> Result<u64, StoreError> {
-        Ok(0)
+        Err(StoreError::Unsupported("repertoire_reset_generation"))
     }
 
     /// Save a game batch at the revision whose repertoire was compared.
@@ -232,7 +236,7 @@ pub trait Store {
         _successful_refresh_ms: Option<u64>,
         _receipt: crate::GameReceipt<'_>,
     ) -> Result<crate::AcceptedGames, StoreError> {
-        Err(invalid("this Store does not support game evidence"))
+        Err(StoreError::Unsupported("commit_games"))
     }
 
     fn game_receipt(
@@ -241,7 +245,7 @@ pub trait Store {
         _id: &str,
         _fingerprint: &str,
     ) -> Result<Option<crate::AcceptedGames>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("game_receipt"))
     }
 
     /// Read chronology for a local PGN with a precise start, by raw game ID.
@@ -250,7 +254,7 @@ pub trait Store {
         _dataset: &DatasetId,
         _id: &str,
     ) -> Result<Option<crate::PgnTiming>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("pgn_timing"))
     }
 
     /// Resolve a previously verified provider game by canonical URL and played facts.
@@ -260,7 +264,7 @@ pub trait Store {
         _url: &str,
         _signature: &str,
     ) -> Result<Option<crate::GameRecord>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("verified_game"))
     }
 
     fn legacy_game_misses(
@@ -269,7 +273,7 @@ pub trait Store {
         _target: &TargetId,
         _version: ContentVersion,
     ) -> Result<Vec<crate::LegacyGameMiss>, StoreError> {
-        Ok(vec![])
+        Err(StoreError::Unsupported("legacy_game_misses"))
     }
 
     fn game_comparison(
@@ -277,7 +281,7 @@ pub trait Store {
         _dataset: &DatasetId,
         _id: &str,
     ) -> Result<Option<crate::GameSummary>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("game_comparison"))
     }
 
     /// Read all closed positions and their accepted attribution, if it is known.
@@ -287,7 +291,7 @@ pub trait Store {
         _source: &str,
         _game_id: &str,
     ) -> Result<crate::GameChoices, StoreError> {
-        Ok(Default::default())
+        Err(StoreError::Unsupported("game_choices"))
     }
 
     /// Page through existing relevance inputs for games with accepted choices.
@@ -296,7 +300,7 @@ pub trait Store {
         _dataset: &DatasetId,
         _after: Option<&crate::EncounterKey>,
     ) -> Result<Vec<crate::EncounterKey>, StoreError> {
-        Ok(Vec::new())
+        Err(StoreError::Unsupported("choice_encounter_keys"))
     }
 
     /// Replace only encounter maps, under their content and exact choice fences.
@@ -307,9 +311,7 @@ pub trait Store {
         _content_revision: Revision,
         _repairs: &[crate::EncounterRepair],
     ) -> Result<usize, StoreError> {
-        Err(invalid(
-            "this Store does not support encounter reconciliation",
-        ))
+        Err(StoreError::Unsupported("repair_choice_encounters"))
     }
 
     fn game_failed(
@@ -317,24 +319,19 @@ pub trait Store {
         _dataset: &DatasetId,
         _key: &crate::GameFailureKey,
     ) -> Result<bool, StoreError> {
-        Ok(false)
+        Err(StoreError::Unsupported("game_failed"))
     }
 
     fn game_failures(
         &self,
         _dataset: &DatasetId,
     ) -> Result<Vec<crate::GameFailureKey>, StoreError> {
-        Ok(vec![])
+        Err(StoreError::Unsupported("game_failures"))
     }
 
     /// Read catalog, Learning and game acceptance facts at one revision.
     fn portable_state(&self) -> Result<(Snapshot, crate::PortableGameEvidence), StoreError> {
-        let snapshot = self.snapshot()?;
-        let evidence = crate::PortableGameEvidence {
-            game_failures: self.game_failures(&snapshot.dataset)?,
-            ..crate::PortableGameEvidence::default()
-        };
-        Ok((snapshot, evidence))
+        Err(StoreError::Unsupported("portable_state"))
     }
 
     /// Recover the source of the issued miss when the dataset retains enough
@@ -343,7 +340,7 @@ pub trait Store {
         &self,
         _lookup: crate::CorrectionGameLookup<'_>,
     ) -> Result<Option<crate::CorrectionGame>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("correction_game"))
     }
 
     fn stored_game(
@@ -352,7 +349,7 @@ pub trait Store {
         _source: &str,
         _id: &str,
     ) -> Result<Option<crate::GameRecord>, StoreError> {
-        Err(invalid("this Store does not support game evidence"))
+        Err(StoreError::Unsupported("stored_game"))
     }
 
     fn games_in_window(
@@ -361,7 +358,7 @@ pub trait Store {
         _from: u64,
         _to: u64,
     ) -> Result<Vec<crate::GameRecord>, StoreError> {
-        Err(invalid("this Store does not support game evidence"))
+        Err(StoreError::Unsupported("games_in_window"))
     }
 
     fn historical_pgn_window(
@@ -371,9 +368,7 @@ pub trait Store {
         _from: u64,
         _to: u64,
     ) -> Result<Vec<crate::GameRecord>, StoreError> {
-        Err(invalid(
-            "this Store does not support historical PGN evidence",
-        ))
+        Err(StoreError::Unsupported("historical_pgn_window"))
     }
 
     /// Restore a new dataset and its acceptance boundaries in one transaction.
@@ -384,9 +379,7 @@ pub trait Store {
         _choice_format: crate::PortableChoiceFormat,
     ) -> Result<Revision, StoreError> {
         if !evidence.is_empty() {
-            return Err(invalid(
-                "this Store does not support portable game evidence",
-            ));
+            return Err(StoreError::Unsupported("restore_with_game_evidence"));
         }
         self.commit(commit)
     }
@@ -396,18 +389,18 @@ pub trait Store {
         _dataset: &DatasetId,
         _model: &str,
     ) -> Result<std::collections::BTreeMap<TargetId, crate::GameTargetRelevance>, StoreError> {
-        Ok(Default::default())
+        Err(StoreError::Unsupported("game_relevance"))
     }
 
     fn game_content_revision(&self, _dataset: &DatasetId) -> Result<Option<Revision>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("game_content_revision"))
     }
 
     fn opponent_gaps(
         &self,
         _dataset: &DatasetId,
     ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
-        Ok(Vec::new())
+        Err(StoreError::Unsupported("opponent_gaps"))
     }
 
     fn game_backfill_state(
@@ -415,7 +408,7 @@ pub trait Store {
         _dataset: &DatasetId,
         _id: Option<&str>,
     ) -> Result<Option<String>, StoreError> {
-        Err(invalid("this Store does not support historical backfill"))
+        Err(StoreError::Unsupported("game_backfill_state"))
     }
 
     /// Persist the job and add any explicitly recognized identities atomically.
@@ -427,7 +420,7 @@ pub trait Store {
         _state: &str,
         _accounts_to_recognize: Option<&[(String, String)]>,
     ) -> Result<(), StoreError> {
-        Err(invalid("this Store does not support historical backfill"))
+        Err(StoreError::Unsupported("save_game_backfill_state"))
     }
 
     fn game_move_distribution(
@@ -435,7 +428,7 @@ pub trait Store {
         _model: &str,
         _position: &str,
     ) -> Result<Option<std::collections::BTreeMap<String, f64>>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("game_move_distribution"))
     }
 
     fn save_game_move_distribution(
@@ -444,7 +437,7 @@ pub trait Store {
         _position: &str,
         _distribution: &std::collections::BTreeMap<String, f64>,
     ) -> Result<(), StoreError> {
-        Err(invalid("this Store does not support model distributions"))
+        Err(StoreError::Unsupported("save_game_move_distribution"))
     }
 
     fn replace_game_model_reach(
@@ -452,18 +445,18 @@ pub trait Store {
         _dataset: &DatasetId,
         _projection: crate::BookProjection<'_>,
     ) -> Result<(), StoreError> {
-        Err(invalid("this Store does not support modeled reach"))
+        Err(StoreError::Unsupported("replace_game_model_reach"))
     }
 
     fn game_model_projection_status(
         &self,
         _dataset: &DatasetId,
     ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
-        Ok(None)
+        Err(StoreError::Unsupported("game_model_projection_status"))
     }
 
     fn model_bootstrap_repertoires(&self, _dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
-        Ok(Vec::new())
+        Err(StoreError::Unsupported("model_bootstrap_repertoires"))
     }
 
     /// Accept one legacy source verification only while the original source is current.
@@ -475,14 +468,23 @@ pub trait Store {
         _source_id: &str,
         _stamp: Option<&crate::ModelInputStamp>,
     ) -> Result<(), StoreError> {
-        Err(invalid(
-            "this Store does not support model source verification",
-        ))
+        Err(StoreError::Unsupported("finish_model_bootstrap"))
+    }
+
+    /// Page through the newest comparison for each game and learner at a fixed
+    /// import watermark. Older summaries can lack per-repertoire comparisons.
+    fn game_library(
+        &self,
+        _dataset: &DatasetId,
+        _through: Option<i64>,
+        _before: Option<i64>,
+    ) -> Result<crate::GameLibraryPage, StoreError> {
+        Err(StoreError::Unsupported("game_library"))
     }
 
     /// The recent answer-safe comparison records for the active dataset.
     fn game_history(&self) -> Result<crate::GameHistory, StoreError> {
-        Err(invalid("this Store does not support game evidence"))
+        Err(StoreError::Unsupported("game_history"))
     }
 
     /// Publish the whole batch and return its new store revision, or publish nothing.
@@ -518,5 +520,50 @@ mod tests {
         let after = store.snapshot().unwrap();
         assert_eq!(after.active_attempt, Some(expected_id.clone()));
         assert!(after.attempts.contains_key(&expected_id));
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use crate::test_support::store;
+    use tempo_chess::demo_catalog;
+
+    #[test]
+    fn default_content_write_rejects_archives_and_receipts_before_any_write() {
+        let mut adapter = store(demo_catalog());
+        let before = adapter.snapshot().unwrap();
+        let commit = Commit {
+            expected_dataset: before.dataset.clone(),
+            expected_revision: before.revision,
+            writes: vec![crate::Write::Active(None)],
+        };
+        assert!(matches!(
+            adapter.commit_content(
+                commit.clone(),
+                Some(ContentSource::Archive {
+                    id: "source",
+                    pgn: "1. e4",
+                }),
+                None
+            ),
+            Err(StoreError::Unsupported("commit_content"))
+        ));
+        assert!(matches!(
+            adapter.commit_content(
+                commit,
+                None,
+                Some(ContentReceipt {
+                    request: "request",
+                    reply: "reply",
+                })
+            ),
+            Err(StoreError::Unsupported("commit_content"))
+        ));
+        assert_eq!(adapter.snapshot().unwrap(), before);
+        assert!(matches!(
+            adapter.game_history(),
+            Err(StoreError::Unsupported("game_history"))
+        ));
     }
 }
