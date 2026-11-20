@@ -14,7 +14,8 @@ use crate::{
     *,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::{borrow::Cow, collections::BTreeSet};
 use tempo_study::AttemptStatus;
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, TargetId};
 
@@ -47,6 +48,47 @@ fn has_position_findings(status: TacticalAnalysisStatus) -> bool {
         status,
         TacticalAnalysisStatus::Complete | TacticalAnalysisStatus::Inconclusive
     )
+}
+
+// Old receipts serialize just the flattened acceptance and use the full
+// observation digest. An already bound Finding did not adopt its proposed
+// content; on replay its detector evidence stays fixed even if a later catalog
+// change makes the proposal resolve to a different retained target.
+#[derive(Deserialize, Serialize)]
+struct TacticalAcceptanceReceipt {
+    #[serde(flatten)]
+    acceptance: TacticalAcceptance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retained_findings: Vec<usize>,
+}
+
+fn payload_fingerprint(
+    analysis: &TacticalAnalysis,
+    retained_findings: &[usize],
+) -> Result<String, StoreError> {
+    let mut observations = Cow::Borrowed(analysis.observations.as_slice());
+    for &index in retained_findings {
+        let finding = observations
+            .to_mut()
+            .get_mut(index)
+            .filter(|row| row.request_scope == TacticalRequestScope::Finding)
+            .ok_or_else(|| conflict("analysis identity reused for different results"))?;
+        if finding.train.take().is_none() {
+            return Err(conflict("analysis identity reused for different results"));
+        }
+    }
+    // Acceptance time is delivery metadata, not part of the immutable analysis result.
+    Ok(blake3::hash(
+        encode(&(
+            analysis.decisions_scanned,
+            analysis.status,
+            &analysis.error,
+            &*observations,
+        ))?
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string())
 }
 
 pub(super) fn accept(
@@ -93,18 +135,6 @@ pub(super) fn accept(
             return Err(invalid("invalid or duplicate tactical observation"));
         }
     }
-    // Acceptance time is delivery metadata, not part of the immutable analysis result.
-    let digest = blake3::hash(
-        encode(&(
-            analysis.decisions_scanned,
-            analysis.status,
-            &analysis.error,
-            &analysis.observations,
-        ))?
-        .as_bytes(),
-    )
-    .to_hex()
-    .to_string();
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
@@ -128,10 +158,11 @@ pub(super) fn accept(
             analysis.analysis_version,analysis.game_fingerprint,position_id,deeper], |r| Ok((r.get(0)?,r.get(1)?))
     ).optional().map_err(database_error)?;
     if let Some((fingerprint, payload)) = prior {
-        if fingerprint != digest {
+        let receipt: TacticalAcceptanceReceipt = decode(&payload)?;
+        if fingerprint != payload_fingerprint(analysis, &receipt.retained_findings)? {
             return Err(conflict("analysis identity reused for different results"));
         }
-        let mut saved: TacticalAcceptance = decode(&payload)?;
+        let mut saved = receipt.acceptance;
         saved.replayed = true;
         saved.new_request_targets.clear();
         return Ok(saved);
@@ -231,7 +262,8 @@ pub(super) fn accept(
         .map_err(database_error)?;
     }
     let mut preserved_requests = BTreeSet::new();
-    for observation in &analysis.observations {
+    let mut retained_findings = Vec::new();
+    for (index, observation) in analysis.observations.iter().enumerate() {
         let producer_id = observation
             .producer
             .as_ref()
@@ -306,6 +338,22 @@ pub(super) fn accept(
             continue;
         }
         if let Some(puzzle) = &observation.train {
+            // Keep the issued binding and its cancellation fence even when the
+            // new finding proposes a different solution. The app omits puzzle
+            // and Learning writes for this finding at the committed revision.
+            if observation.request_scope == TacticalRequestScope::Finding
+                && tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE observation_id=?1
+                     AND (attempt_id IS NOT NULL OR fulfilled=1))",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(database_error)?
+            {
+                retained_findings.push(index);
+                continue;
+            }
             let next = next
                 .as_ref()
                 .ok_or_else(|| invalid("training requires staged content and learning"))?;
@@ -390,15 +438,20 @@ pub(super) fn accept(
     }
     acceptance.new_request_targets.sort();
     acceptance.new_request_targets.dedup();
+    let digest = payload_fingerprint(analysis, &retained_findings)?;
+    let receipt = TacticalAcceptanceReceipt {
+        acceptance,
+        retained_findings,
+    };
     tx.execute("INSERT INTO tactical_analyses(dataset_id,source,game_id,learner,report,analysis_version,
         game_fingerprint,status,analyzed_at_ms,decisions_scanned,payload_fingerprint,error,acceptance,position_id,deeper)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,
             analysis.analysis_version,analysis.game_fingerprint,status_name(analysis.status),
-            analysis.analyzed_at_ms,analysis.decisions_scanned,digest,analysis.error,encode(&acceptance)?,position_id,deeper]
+            analysis.analyzed_at_ms,analysis.decisions_scanned,digest,analysis.error,encode(&receipt)?,position_id,deeper]
     ).map_err(database_error)?;
     tx.commit().map_err(database_error)?;
-    Ok(acceptance)
+    Ok(receipt.acceptance)
 }
 
 pub(super) fn pending_games(
@@ -1170,20 +1223,30 @@ impl SqliteStore {
     }
 }
 
-pub(super) fn issued_for_turn(
+pub(super) fn issued_request(
     connection: &Connection,
     dataset: &DatasetId,
     game: &TacticalGame,
     report: &str,
-    ply: u32,
+    address: crate::TacticalRequestAddress<'_>,
 ) -> Result<Option<TacticalPuzzleRef>, StoreError> {
+    use crate::TacticalRequestAddress;
     active(connection, dataset)?;
+    let (ply, motif, producer) = match address {
+        TacticalRequestAddress::Decision { ply } => (ply, None, None),
+        TacticalRequestAddress::Finding {
+            ply,
+            motif,
+            producer_id,
+        } => (ply, Some(motif), Some(producer_id)),
+    };
     let row = connection
         .query_row(
             "SELECT r.target_id,r.version FROM tactical_requests r
          JOIN tactical_observations o ON o.id=r.observation_id
          WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)=(?1,?2,?3,?4,?5,?6)
              AND (r.attempt_id IS NOT NULL OR r.fulfilled=1)
+             AND (?7 IS NULL OR (o.motif,o.producer_id)=(?7,?8))
          ORDER BY r.id LIMIT 1",
             params![
                 dataset.0,
@@ -1191,7 +1254,9 @@ pub(super) fn issued_for_turn(
                 game.game.id,
                 game.learner,
                 report,
-                ply
+                ply,
+                motif,
+                producer,
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )

@@ -35,6 +35,19 @@ impl TacticalRequestScope {
     }
 }
 
+/// Address the request whose issued content must survive a revised finding.
+#[derive(Clone, Copy, Debug)]
+pub enum TacticalRequestAddress<'a> {
+    /// One complete decision may replace earlier detector findings at this ply.
+    Decision { ply: u32 },
+    /// An individual detector finding owns its exact occurrence binding.
+    Finding {
+        ply: u32,
+        motif: &'a str,
+        producer_id: &'a str,
+    },
+}
+
 /// `outcome` and `details_json` are the report's authoritative result, retained
 /// for reporting. Store never interprets them to choose a learning action.
 /// `train` is the application's explicit instruction to request blind recall.

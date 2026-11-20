@@ -81,5 +81,6 @@ pub use tactical_analysis::{
     TacticalAnalysisStatus, TacticalArchiveGame, TacticalDecisionDetails, TacticalDecisionRow,
     TacticalGame, TacticalGameCursor, TacticalObservation, TacticalObservationPage,
     TacticalPositionRun, TacticalPositionTask, TacticalPuzzleRef, TacticalRequest,
-    TacticalRequestScope, TacticalStatistics, TacticalTrainingLink, TacticalTrainingStatus,
+    TacticalRequestAddress, TacticalRequestScope, TacticalStatistics, TacticalTrainingLink,
+    TacticalTrainingStatus,
 };

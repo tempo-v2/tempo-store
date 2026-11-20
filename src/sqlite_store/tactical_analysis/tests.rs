@@ -229,6 +229,49 @@ fn atomic_acceptance_replay_and_changed_detector_version_do_not_duplicate_real_o
 }
 
 #[test]
+fn a_bound_finding_replays_after_its_unadopted_proposal_resolves_to_a_different_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("study.sqlite");
+    let (mut store, target) = fixture(&path);
+    let dataset: DatasetId = "dataset".into();
+    game(&store, "one");
+    let first = analysis("one", Some(&target));
+    accept(&mut store, &first, &target);
+    let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
+    let issued = issue_request(&mut store, &request, "bound");
+    let before = store.snapshot().unwrap();
+    let mut revised = analysis("one", Some(&"proposed".into()));
+    revised.analysis_version = "revised".into();
+    revised.observations[0].details_json = r#"{"answer":"d2d4"}"#.into();
+    let saved = accept(&mut store, &revised, &target);
+    assert_eq!(saved.new_requests, 0);
+    drop(store);
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    revised.observations[0].train.as_mut().unwrap().target = "independent-alias".into();
+    let replay = accept(&mut store, &revised, &target);
+    assert!(replay.replayed);
+    assert_eq!(replay.revision, saved.revision);
+    let after = store.snapshot().unwrap();
+    assert_eq!(after.catalog, before.catalog);
+    assert_eq!(after.learning, before.learning);
+    assert_eq!(after.active_attempt, Some(issued.attempt.id));
+
+    revised.observations[0].details_json = r#"{"answer":"c2c4"}"#.into();
+    assert!(matches!(
+        store.commit_tactical_analysis(
+            Commit {
+                expected_dataset: dataset,
+                expected_revision: after.revision,
+                writes: vec![],
+            },
+            &revised,
+        ),
+        Err(StoreError::Conflict(_))
+    ));
+}
+
+#[test]
 fn zero_based_occurrences_retract_on_replacement_without_erasing_audit_or_mixing_versions() {
     let dir = tempfile::tempdir().unwrap();
     let (mut store, target) = fixture(&dir.path().join("study.sqlite"));
