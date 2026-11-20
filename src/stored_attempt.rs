@@ -2,7 +2,7 @@
 
 use crate::ChessAttempt;
 use serde::{Deserialize, Serialize};
-use tempo_types::{MissRevision, StudyTime};
+use tempo_types::{MissRevision, Revision, StudyTime};
 
 /// Fixed when an activity is durably issued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +37,12 @@ pub enum AcceptanceKind {
     Revealed { decision_index: usize },
 }
 
+/// The latest learner decision whose prescribed move an accepted response disclosed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevealedDecision {
+    pub decision_index: usize,
+}
+
 /// A Study attempt plus the learning context fixed when it was issued.
 ///
 /// # When to use
@@ -54,6 +60,9 @@ pub enum AcceptanceKind {
 pub struct StoredAttempt {
     pub attempt: ChessAttempt,
     pub issued_at: StudyTime,
+    /// Store revision immediately before issuance. Older rows precede tracked issuance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_revision: Option<Revision>,
     pub issued_miss_revision: MissRevision,
     #[serde(default)]
     pub mode: ActivityMode,
@@ -71,6 +80,9 @@ pub struct StoredAttempt {
     pub lesson: Option<tempo_chess::RepertoireLesson>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<ActivityAcceptance>,
+    /// Set by Tempo from the accepted Study transition, independent of the first grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revealed_decision: Option<RevealedDecision>,
 }
 
 #[cfg(test)]

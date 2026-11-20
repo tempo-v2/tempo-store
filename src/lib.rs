@@ -45,7 +45,7 @@ pub use store::{
     ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyScope,
 };
 pub use store_error::StoreError;
-pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, StoredAttempt};
+pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, RevealedDecision, StoredAttempt};
 pub use write::Write;
 
 mod game_model;

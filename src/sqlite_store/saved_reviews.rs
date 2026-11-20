@@ -1,7 +1,7 @@
 use super::database_error;
 use super::row_values::{decode, read_selected, text_value};
 use crate::{
-    ReviewCommandKey, ReviewWrite, SavedReview, SavedReviewContext, StoreError,
+    RevealedDecision, ReviewCommandKey, ReviewWrite, SavedReview, SavedReviewContext, StoreError,
     store_error::{conflict, invalid},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -54,24 +54,35 @@ pub(super) fn context(
 ) -> Result<Option<SavedReviewContext>, StoreError> {
     let tx = connection.unchecked_transaction().map_err(database_error)?;
     check_dataset(&tx, dataset)?;
-    // Study inserts each attempt once and updates progress in place. Row order
-    // records issuance even when consecutive commands have the same clock time.
     let rows: Vec<SavedReviewContext> = read_selected(
         &tx,
-        "SELECT r.decision_index, source.record, active.record,
-                EXISTS(SELECT 1 FROM attempts later
-                       WHERE later.dataset_id=r.dataset_id AND later.target_id=r.target_id
-                         AND later.version=r.version AND later.rowid > source.rowid
-                         AND json_extract(later.record, '$.attempt.status')='complete'),
-                EXISTS(SELECT 1 FROM receipts
-                       WHERE attempt_id=r.attempt_id
-                         AND json_extract(result, '$.Study.attempt.state.decision_index')=r.decision_index
-                         AND (json_extract(result, '$.Study.feedback.correct')=0
-                              OR CASE WHEN json_valid(command) THEN json_extract(command, '$[0]') END='concede'))
-         FROM saved_reviews r JOIN attempts source ON source.id=r.attempt_id
-         JOIN store_state s ON s.singleton=1
-         LEFT JOIN attempts active ON active.id=s.active_attempt_id AND active.target_id=r.target_id
-         WHERE r.dataset_id=?1 AND r.id=?2",
+        "WITH mark AS (
+             SELECT r.decision_index, r.attempt_id, r.dataset_id, r.target_id, r.version,
+                    source.record AS source_record
+             FROM saved_reviews r JOIN attempts source ON source.id=r.attempt_id
+             WHERE r.dataset_id=?1 AND r.id=?2
+         ), later_attempts AS (
+             SELECT json_extract(later.record, '$.attempt.status') AS status,
+                    json_extract(later.record, '$.revealed_decision.decision_index') AS revealed
+             FROM mark JOIN attempts later
+               ON later.dataset_id=mark.dataset_id AND later.target_id=mark.target_id
+                 AND later.version=mark.version
+             WHERE json_extract(later.record, '$.issued_revision') >
+                   coalesce(json_extract(mark.source_record, '$.issued_revision'), -1)
+               AND json_extract(later.record, '$.attempt.status') IN ('complete','abandoned')
+         )
+         SELECT mark.decision_index, mark.source_record, active.record,
+                EXISTS(SELECT 1 FROM later_attempts WHERE status='complete'),
+                (SELECT max(revealed) FROM later_attempts WHERE status='abandoned'),
+                CASE WHEN json_extract(mark.source_record, '$.issued_revision') IS NULL
+                     AND json_extract(mark.source_record, '$.revealed_decision') IS NULL
+                     THEN EXISTS(SELECT 1 FROM receipts
+                                 WHERE attempt_id=mark.attempt_id
+                                   AND json_extract(result, '$.Study.attempt.state.decision_index')=mark.decision_index
+                                   AND json_extract(result, '$.Study.feedback.correct')=0)
+                     ELSE 0 END
+         FROM mark JOIN store_state s ON s.singleton=1
+         LEFT JOIN attempts active ON active.id=s.active_attempt_id AND active.target_id=mark.target_id",
         params![dataset.0, id],
         |row| {
             Ok(SavedReviewContext {
@@ -84,7 +95,9 @@ pub(super) fn context(
                     .map(decode)
                     .transpose()?,
                 later_completed: row.get(3).map_err(database_error)?,
-                source_revealed_decision: row.get(4).map_err(database_error)?,
+                later_abandoned_reveal: row.get::<_, Option<usize>>(4).map_err(database_error)?
+                    .map(|decision_index| RevealedDecision { decision_index }),
+                legacy_source_feedback: row.get(5).map_err(database_error)?,
             })
         },
     )?;

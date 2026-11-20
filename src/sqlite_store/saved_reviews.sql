@@ -13,8 +13,8 @@ CREATE TABLE saved_reviews (
 
 CREATE INDEX saved_reviews_page ON saved_reviews(dataset_id, id DESC);
 CREATE INDEX saved_reviews_attempt ON saved_reviews(attempt_id);
-CREATE INDEX completed_attempts_by_version ON attempts(dataset_id, target_id, version)
-    WHERE json_extract(record, '$.attempt.status') = 'complete';
+CREATE INDEX disclosed_attempts_by_version ON attempts(dataset_id, target_id, version)
+    WHERE json_extract(record, '$.attempt.status') IN ('complete','abandoned');
 
 CREATE TABLE saved_review_receipts (
     dataset_id TEXT NOT NULL REFERENCES datasets(id),

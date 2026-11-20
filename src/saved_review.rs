@@ -1,5 +1,5 @@
 //! Attempt-linked references for the desktop review list.
-use crate::StoredAttempt;
+use crate::{RevealedDecision, StoredAttempt};
 use serde::Serialize;
 use tempo_types::{AttemptId, ContentVersion, DatasetId, TargetId};
 
@@ -29,8 +29,12 @@ pub struct SavedReviewContext {
     pub decision_index: usize,
     pub source: StoredAttempt,
     pub active: Option<StoredAttempt>,
+    /// Whether a later attempt of this issued version completed.
     pub later_completed: bool,
-    pub source_revealed_decision: bool,
+    /// Highest explicit reveal among later abandoned attempts of this issued version.
+    pub later_abandoned_reveal: Option<RevealedDecision>,
+    /// Compatibility fallback for attempts written before explicit reveal tracking.
+    pub legacy_source_feedback: bool,
 }
 
 pub struct ReviewCommandKey<'a> {
