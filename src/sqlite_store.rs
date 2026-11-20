@@ -212,18 +212,34 @@ impl SqliteStore {
             return Err(conflict("snapshot changed; reload before retrying"));
         }
         {
-            let mut insert = tx.prepare_cached(
-                "UPDATE current_content SET item=json_set(item,'$.opponent_lead_in',json(?1))
-                 WHERE dataset_id=?2 AND target_id=?3 AND json_extract(item,'$.opponent_lead_in') IS NULL",
+            let mut read = tx.prepare_cached(
+                "SELECT item -> '$.opponent_lead_in' FROM current_content WHERE dataset_id=?1 AND target_id=?2",
             ).map_err(database_error)?;
+            let mut update = tx
+                .prepare_cached(
+                    "UPDATE current_content SET item=json_set(item,'$.opponent_lead_in',json(?1))
+                 WHERE dataset_id=?2 AND target_id=?3",
+                )
+                .map_err(database_error)?;
             for (target, context) in evidence {
-                if insert
-                    .execute(params![row_values::encode(context)?, dataset.0, target.0])
+                let raw: Option<String> = read
+                    .query_row(params![dataset.0, target.0], |row| row.get(0))
+                    .optional()
                     .map_err(database_error)?
-                    != 1
-                {
+                    .ok_or_else(|| conflict("setup target changed; reload before retrying"))?;
+                let previous: LeadInEvidence = raw
+                    .as_deref()
+                    .map(row_values::decode)
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut resolved = previous.clone();
+                resolved.reconcile(context);
+                if resolved == previous || resolved != *context {
                     return Err(conflict("setup context changed; reload before retrying"));
                 }
+                update
+                    .execute(params![row_values::encode(context)?, dataset.0, target.0])
+                    .map_err(database_error)?;
             }
         }
         tx.commit().map_err(database_error)
