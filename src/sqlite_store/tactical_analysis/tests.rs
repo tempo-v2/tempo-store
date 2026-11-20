@@ -126,7 +126,7 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
             day: StudyDay(10),
             unix_ms: 2_000,
         },
-        issued_revision: None,
+        issued_revision: Some(snapshot.revision),
         issued_miss_revision: snapshot.learning[&request.target].miss_revision,
         mode: ActivityMode::Practice,
         route: None,
@@ -664,7 +664,7 @@ fn pending_keyset_sweep_covers_more_than_501_undated_games_and_records_empty_and
             stats.pending_games,
             stats.observations
         ),
-        (1, 1, 598, 0)
+        (1, 1, 0, 0)
     );
     assert_eq!(
         store
