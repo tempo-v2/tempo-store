@@ -82,6 +82,39 @@ pub trait Store {
         self.commit(commit)
     }
 
+    /// Read up to 31 saved positions in reverse insertion order, before an optional cursor.
+    fn saved_review_page(
+        &self,
+        _dataset: &DatasetId,
+        _before: Option<i64>,
+    ) -> Result<Vec<crate::SavedReview>, StoreError> {
+        Err(StoreError::Unsupported("saved_review_page"))
+    }
+
+    fn saved_review_context(
+        &self,
+        _dataset: &DatasetId,
+        _id: i64,
+    ) -> Result<Option<crate::SavedReviewContext>, StoreError> {
+        Err(StoreError::Unsupported("saved_review_context"))
+    }
+
+    fn saved_review_receipt(
+        &self,
+        _key: &crate::ReviewCommandKey<'_>,
+    ) -> Result<Option<i64>, StoreError> {
+        Err(StoreError::Unsupported("saved_review_receipt"))
+    }
+
+    /// Change only the saved list, with exact command replay in the same transaction.
+    fn write_saved_review(
+        &mut self,
+        _key: &crate::ReviewCommandKey<'_>,
+        _change: crate::ReviewWrite<'_>,
+    ) -> Result<i64, StoreError> {
+        Err(StoreError::Unsupported("write_saved_review"))
+    }
+
     /// Read a page of current tactics and basic learning facts in target order.
     fn tactic_page(
         &self,

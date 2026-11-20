@@ -23,6 +23,7 @@ mod load_snapshot;
 mod load_study;
 mod repertoire_resets;
 mod row_values;
+mod saved_reviews;
 mod save_snapshot;
 
 use load_snapshot::load_snapshot;
@@ -30,7 +31,8 @@ use save_snapshot::save_snapshot;
 
 pub use game_choices::ChoiceMigrationReport;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
+const SAVED_REVIEWS_SCHEMA: &str = include_str!("sqlite_store/saved_reviews.sql");
 const CORRECTIVE_RELEASE_SCHEMA: &str = include_str!("sqlite_store/corrective_release.sql");
 const GAME_RELEVANCE_SCHEMA: &str = include_str!("sqlite_store/game_relevance.sql");
 const PORTABLE_EVIDENCE_SCHEMA: &str = include_str!("sqlite_store/portable_evidence.sql");
@@ -134,6 +136,9 @@ impl SqliteStore {
             .execute_batch(CORRECTIVE_RELEASE_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(SAVED_REVIEWS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
@@ -195,7 +200,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=10) {
+        if matches!(schema_version(&connection)?, 2..=11) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -251,6 +256,11 @@ impl SqliteStore {
                 tx.execute_batch(CORRECTIVE_RELEASE_SCHEMA)
                     .map_err(database_error)?;
                 choice_migration = Some(game_choices::migrate(&tx)?);
+                tx.pragma_update(None, "user_version", 11)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 11 {
+                tx.execute_batch(SAVED_REVIEWS_SCHEMA).map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -299,6 +309,37 @@ impl SqliteStore {
 mod tactic_page;
 
 impl Store for SqliteStore {
+    fn saved_review_page(
+        &self,
+        dataset: &DatasetId,
+        before: Option<i64>,
+    ) -> Result<Vec<crate::SavedReview>, StoreError> {
+        saved_reviews::page(&self.connection, dataset, before)
+    }
+
+    fn saved_review_context(
+        &self,
+        dataset: &DatasetId,
+        id: i64,
+    ) -> Result<Option<crate::SavedReviewContext>, StoreError> {
+        saved_reviews::context(&self.connection, dataset, id)
+    }
+
+    fn saved_review_receipt(
+        &self,
+        key: &crate::ReviewCommandKey<'_>,
+    ) -> Result<Option<i64>, StoreError> {
+        saved_reviews::receipt(&self.connection, key)
+    }
+
+    fn write_saved_review(
+        &mut self,
+        key: &crate::ReviewCommandKey<'_>,
+        change: crate::ReviewWrite<'_>,
+    ) -> Result<i64, StoreError> {
+        saved_reviews::write(&mut self.connection, key, change)
+    }
+
     fn reset_repertoire(
         &mut self,
         dataset: &DatasetId,

@@ -13,6 +13,10 @@ mod content_history;
 mod memory_store;
 mod receipt;
 mod receipt_result;
+mod saved_review;
+pub use saved_review::{
+    ReviewCommandKey, ReviewPosition, ReviewWrite, SavedReview, SavedReviewContext,
+};
 mod snapshot;
 mod sqlite_store;
 mod store;
@@ -41,7 +45,7 @@ pub use store::{
     ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyScope,
 };
 pub use store_error::StoreError;
-pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, StoredAttempt};
+pub use stored_attempt::{AcceptanceKind, ActivityAcceptance, ActivityMode, RevealedDecision, StoredAttempt};
 pub use write::Write;
 
 mod game_model;

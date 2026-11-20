@@ -36,6 +36,7 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
             day: StudyDay(10),
             unix_ms: 100,
         },
+        issued_revision: Some(snapshot.revision),
         issued_miss_revision: snapshot.learning[&target].miss_revision,
         mode: crate::ActivityMode::Test,
         route: None,
@@ -44,6 +45,7 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
         relevance_reason: None,
         lesson: None,
         acceptance: None,
+        revealed_decision: None,
     }
 }
 pub(crate) fn successful_answer_writes(snapshot: &Snapshot) -> Vec<Write> {

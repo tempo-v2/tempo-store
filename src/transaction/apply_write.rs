@@ -2,7 +2,7 @@
 use crate::store_error::{conflict, invalid};
 use crate::{ContentHistory, Snapshot, StoreError, Write};
 use tempo_study::AttemptStatus;
-use tempo_types::Revision;
+use tempo_types::{Grade, Revision};
 
 fn remember_catalog(state: &mut Snapshot) {
     let retained: std::collections::BTreeSet<_> = state
@@ -42,7 +42,9 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || attempt.content_version != item.version
                 || attempt.revision != Revision(0)
                 || attempt.terminal.is_some()
+                || record.issued_revision != Some(state.revision)
                 || record.acceptance.is_some()
+                || record.revealed_decision.is_some()
                 || attempt.status != AttemptStatus::Active
                 || record.issued_miss_revision != learning.miss_revision
             {
@@ -62,6 +64,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || next.target != old.target
                 || next.content_version != old.content_version
                 || record.issued_at != previous.issued_at
+                || record.issued_revision != previous.issued_revision
                 || record.issued_miss_revision != previous.issued_miss_revision
                 || record.mode != previous.mode
                 || record.route != previous.route
@@ -79,9 +82,20 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                     "attempt identity, revision or terminal outcome changed illegally",
                 ));
             }
+            if record.revealed_decision != previous.revealed_decision
+                && !record.revealed_decision.is_some_and(|proof| {
+                    !record.mode.guided()
+                        && next.terminal == Some(Grade::Again)
+                        && proof.decision_index == old.state.decision_index
+                        && proof.decision_index == next.state.decision_index
+                })
+            {
+                return Err(invalid(
+                    "the revealed decision must match the accepted attempt cursor",
+                ));
+            }
             if let Some(acceptance) = &record.acceptance {
                 use crate::AcceptanceKind;
-                use tempo_types::Grade;
                 if acceptance.at.unix_ms < record.issued_at.unix_ms
                     || acceptance.at.day < record.issued_at.day
                 {

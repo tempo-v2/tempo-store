@@ -76,6 +76,7 @@ mod tests {
                 day: StudyDay(10),
                 unix_ms: 100,
             },
+            issued_revision: Some(initial.revision),
             issued_miss_revision: initial.learning[&target].miss_revision,
             mode: crate::ActivityMode::Test,
             route: None,
@@ -84,6 +85,7 @@ mod tests {
             relevance_reason: None,
             lesson: None,
             acceptance: None,
+            revealed_decision: None,
         };
         store
             .commit(Commit {
