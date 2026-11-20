@@ -228,6 +228,7 @@ pub(super) fn accept(
         )
         .map_err(database_error)?;
     }
+    let mut preserved_requests = BTreeSet::new();
     for observation in &analysis.observations {
         let producer_id = observation
             .producer
@@ -261,6 +262,47 @@ pub(super) fn accept(
             .map_err(database_error)?;
         tx.execute("UPDATE tactical_observations SET analysis_version=?2,outcome=?3,details_json=?4,producer=?5,current=1 WHERE id=?1",
             params![id,analysis.analysis_version,observation.outcome,observation.details_json,producer]).map_err(database_error)?;
+        let mut retain_issued = false;
+        if observation.request_scope == TacticalRequestScope::Decision
+            && observation.train.is_some()
+        {
+            let prior: Option<(u64, bool, String, Vec<u8>)> = tx.query_row(
+                "SELECT r.id, (r.attempt_id IS NOT NULL OR r.fulfilled=1), r.target_id, r.version
+                 FROM tactical_requests r JOIN tactical_observations prior ON prior.id=r.observation_id
+                 WHERE (prior.dataset_id,prior.source,prior.game_id,prior.learner,prior.report,prior.ply)
+                       =(?1,?2,?3,?4,?5,?6)
+                 ORDER BY (r.attempt_id IS NOT NULL OR r.fulfilled=1) DESC, (r.observation_id=?7) DESC, r.id LIMIT 1",
+                params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,observation.ply,id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            ).optional().map_err(database_error)?;
+            if let Some((request_id, issued, target, version)) = prior {
+                retain_issued = issued;
+                if issued {
+                    let proposed = observation.train.as_ref().expect("request proposed");
+                    if proposed.target.0 != target || proposed.version.0 != decode_counter(version)?
+                    {
+                        return Err(conflict(
+                            "the tactical decision already has an issued request",
+                        ));
+                    }
+                    preserved_requests.insert(request_id);
+                    tx.execute(
+                        "UPDATE tactical_requests SET cancelled=0 WHERE id=?1",
+                        [request_id],
+                    )
+                    .map_err(database_error)?;
+                } else {
+                    tx.execute(
+                        "UPDATE tactical_requests SET observation_id=?1 WHERE id=?2",
+                        params![id, request_id],
+                    )
+                    .map_err(database_error)?;
+                }
+            }
+        }
+        if retain_issued {
+            continue;
+        }
         if let Some(puzzle) = &observation.train {
             let next = next
                 .as_ref()
@@ -303,30 +345,46 @@ pub(super) fn accept(
                 ],
             )
             .map_err(database_error)?;
-        } else {
+        } else if analysis.status == TacticalAnalysisStatus::Complete {
             tx.execute(
                 "UPDATE tactical_requests SET cancelled=1 WHERE observation_id=?1
-                AND attempt_id IS NULL AND fulfilled=0",
+                AND fulfilled=0",
                 [id],
             )
             .map_err(database_error)?;
         }
     }
-    if has_position_findings(analysis.status) {
-        // A complete revised scan can retract an old finding. Failed scans cannot.
-        tx.execute(
-            "UPDATE tactical_requests SET cancelled=1 WHERE attempt_id IS NULL AND fulfilled=0
-            AND observation_id IN (SELECT id FROM tactical_observations WHERE
-                (dataset_id,source,game_id,learner,report)=(?1,?2,?3,?4,?5) AND current=0 AND (?6 IS NULL OR ply=?6))",
-            params![
-                dataset.0,
-                analysis.source,
-                analysis.game_id,
-                analysis.learner,
-                analysis.report, ply
-            ],
-        )
-        .map_err(database_error)?;
+    if analysis.status == TacticalAnalysisStatus::Complete {
+        // Retiring future issuance never changes the issued attempt or its receipts.
+        let mut prior = tx.prepare(
+            "SELECT r.id FROM tactical_requests r JOIN tactical_observations o ON o.id=r.observation_id
+             WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.report)=(?1,?2,?3,?4,?5)
+               AND o.current=0 AND (?6 IS NULL OR o.ply=?6) AND r.fulfilled=0"
+        ).map_err(database_error)?;
+        let ids = prior
+            .query_map(
+                params![
+                    dataset.0,
+                    analysis.source,
+                    analysis.game_id,
+                    analysis.learner,
+                    analysis.report,
+                    ply
+                ],
+                |row| row.get::<_, u64>(0),
+            )
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        for request in ids {
+            if !preserved_requests.contains(&request) {
+                tx.execute(
+                    "UPDATE tactical_requests SET cancelled=1 WHERE id=?1",
+                    [request],
+                )
+                .map_err(database_error)?;
+            }
+        }
     }
     acceptance.new_request_targets.sort();
     acceptance.new_request_targets.dedup();
@@ -536,7 +594,7 @@ pub(super) fn settle_attempts(
         match record.attempt.status {
             AttemptStatus::Complete => {
                 tx.execute(
-                    "UPDATE tactical_requests SET fulfilled=1
+                    "UPDATE tactical_requests SET fulfilled=1,cancelled=0
                 WHERE dataset_id=?1 AND attempt_id=?2 AND fulfilled=0",
                     params![next.dataset.0, id.0],
                 )
@@ -643,7 +701,8 @@ pub(super) fn statistics(
     let mut outcomes = tx
         .prepare(
             "SELECT outcome,count(*) FROM tactical_observations WHERE
-        dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1 GROUP BY outcome",
+        dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1
+        AND json_type(details_json,'$.assessment.personal') IS NULL GROUP BY outcome",
         )
         .map_err(database_error)?;
     stats.outcomes = outcomes
@@ -676,6 +735,7 @@ pub(super) fn observations(
         o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0),o.producer
         FROM tactical_observations o LEFT JOIN tactical_requests r ON r.observation_id=o.id
         WHERE o.dataset_id=?1 AND o.report=?2 AND o.analysis_version=?3 AND o.current=1
+          AND json_type(o.details_json,'$.assessment.personal') IS NULL
           AND (?4 IS NULL OR o.id<?4) ORDER BY o.id DESC LIMIT ?5").map_err(database_error)?;
     let mut rows = query
         .query(params![dataset.0, report, version, before, limit + 1])
@@ -713,6 +773,7 @@ pub(super) fn observations(
                 outcome: r.get(9).map_err(database_error)?,
                 details_json: r.get(10).map_err(database_error)?,
                 train,
+                request_scope: TacticalRequestScope::Finding,
             },
             // Cancelled unissued requests remain in the audit tables, but are
             // not a live or fulfilled puzzle link in the current report.
@@ -750,6 +811,25 @@ pub(super) fn enroll(
 }
 
 impl SqliteStore {
+    pub fn enroll_verified_archive(&self, dataset: &DatasetId) -> Result<(), StoreError> {
+        active(&self.connection, dataset)?;
+        self.connection
+            .execute(
+                "INSERT INTO tactical_enrollment(dataset_id,source,game_id,learner,priority)
+             SELECT g.dataset_id,g.source,g.id,lower(json_extract(c.summary,'$.learner')),0
+             FROM games g JOIN game_comparisons c ON c.ordinal=(
+                SELECT max(a.ordinal) FROM game_comparisons a
+                WHERE (a.dataset_id,a.source,a.game_id)=(g.dataset_id,g.source,g.id))
+             WHERE g.dataset_id=?1 AND
+                (lower(g.white)=lower(json_extract(c.summary,'$.learner')))!=
+                (lower(g.black)=lower(json_extract(c.summary,'$.learner')))
+             ON CONFLICT DO NOTHING",
+                [&dataset.0],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     pub fn queue_game_analysis(
         &self,
         dataset: &DatasetId,
@@ -948,4 +1028,150 @@ pub(super) fn lead_in(
         )
         .map_err(database_error)?;
     encoded.as_deref().map(decode).transpose()
+}
+
+impl SqliteStore {
+    pub fn tactical_archive(
+        &self,
+        dataset: &DatasetId,
+        version: &str,
+    ) -> Result<Vec<TacticalArchiveGame>, StoreError> {
+        active(&self.connection, dataset)?;
+        let mut query = self.connection.prepare(
+            "WITH latest AS (
+                SELECT max(ordinal) AS ordinal FROM game_comparisons WHERE dataset_id=?1 GROUP BY source,game_id
+             )
+             SELECT g.source,g.id,lower(json_extract(c.summary,'$.learner')),g.white,g.pgn,
+                    g.start_ms,g.end_ms,coalesce(e.expanded=?2 AND NOT EXISTS (
+                        SELECT 1 FROM tactical_positions p
+                        WHERE p.enrollment_id=e.id AND p.analysis_version=?2
+                          AND p.game_fingerprint=g.mainline_signature AND p.status<>'complete'
+                    ),0)
+             FROM latest JOIN game_comparisons c USING(ordinal)
+             JOIN games g ON (g.dataset_id,g.source,g.id)=(c.dataset_id,c.source,c.game_id)
+             LEFT JOIN tactical_enrollment e ON (e.dataset_id,e.source,e.game_id,e.learner)
+                  =(g.dataset_id,g.source,g.id,lower(json_extract(c.summary,'$.learner')))
+             WHERE (lower(g.white)=lower(json_extract(c.summary,'$.learner')))!=
+                   (lower(g.black)=lower(json_extract(c.summary,'$.learner')))"
+        ).map_err(database_error)?;
+        query
+            .query_map(params![dataset.0, version], |row| {
+                Ok(TacticalArchiveGame {
+                    source: row.get(0)?,
+                    id: row.get(1)?,
+                    learner: row.get(2)?,
+                    white: row.get(3)?,
+                    pgn: row.get(4)?,
+                    start_ms: row.get(5)?,
+                    end_ms: row.get(6)?,
+                    fully_analyzed: row.get(7)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn tactical_decisions(
+        &self,
+        dataset: &DatasetId,
+        report: &str,
+        version: &str,
+    ) -> Result<Vec<TacticalDecisionRow>, StoreError> {
+        active(&self.connection, dataset)?;
+        let mut query = self.connection.prepare(
+            "SELECT id,source,game_id,ply,json_extract(details_json,'$.position'),outcome,
+               (SELECT json_group_array(json_array(json_extract(value,'$.motif'),json_extract(value,'$.answer.uci')))
+                FROM json_each(details_json,'$.assessment.personal.candidates')),
+               (SELECT json_group_array(json_extract(value,'$.uci'))
+                FROM json_each(details_json,'$.assessment.accepted_moves'))
+             FROM tactical_observations o
+             WHERE dataset_id=?1 AND report=?2 AND analysis_version=?3 AND current=1
+               AND o.learner=(SELECT lower(json_extract(c.summary,'$.learner')) FROM game_comparisons c
+                  WHERE (c.dataset_id,c.source,c.game_id)=(o.dataset_id,o.source,o.game_id)
+                  ORDER BY c.ordinal DESC LIMIT 1)
+               AND json_type(details_json,'$.assessment.personal')='object'
+             ORDER BY id DESC"
+        ).map_err(database_error)?;
+        let mut rows = query
+            .query(params![dataset.0, report, version])
+            .map_err(database_error)?;
+        let mut decisions = vec![];
+        while let Some(row) = rows.next().map_err(database_error)? {
+            let outcome: String = row.get(5).map_err(database_error)?;
+            decisions.push(TacticalDecisionRow {
+                id: row.get(0).map_err(database_error)?,
+                source: row.get(1).map_err(database_error)?,
+                game_id: row.get(2).map_err(database_error)?,
+                ply: row.get(3).map_err(database_error)?,
+                position: row.get(4).map_err(database_error)?,
+                outcome: decode(&format!("\"{outcome}\""))?,
+                candidates: decode(&row.get::<_, String>(6).map_err(database_error)?)?,
+                accepted: decode(&row.get::<_, String>(7).map_err(database_error)?)?,
+            });
+        }
+        Ok(decisions)
+    }
+
+    /// Read only the selected, current findings and their accepted training links.
+    pub fn tactical_details(
+        &self,
+        dataset: &DatasetId,
+        id: u64,
+        version: &str,
+    ) -> Result<Option<(String, Option<u64>, bool)>, StoreError> {
+        active(&self.connection, dataset)?;
+        self.connection.query_row(
+            "SELECT o.details_json,r.id,coalesce(r.fulfilled,0)
+             FROM tactical_observations o LEFT JOIN tactical_requests r ON r.id=(
+                 SELECT request.id FROM tactical_requests request
+                 JOIN tactical_observations basis ON basis.id=request.observation_id
+                 WHERE (basis.dataset_id,basis.source,basis.game_id,basis.learner,basis.report,basis.ply)
+                       =(o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)
+                       AND (request.cancelled=0 OR request.attempt_id IS NOT NULL)
+                 ORDER BY (basis.id=?2) DESC,request.id LIMIT 1)
+             WHERE o.dataset_id=?1 AND o.id=?2 AND o.analysis_version=?3 AND o.current=1
+                AND json_type(o.details_json,'$.assessment.personal')='object'
+                AND o.learner=(SELECT lower(json_extract(c.summary,'$.learner')) FROM game_comparisons c
+                  WHERE (c.dataset_id,c.source,c.game_id)=(o.dataset_id,o.source,o.game_id)
+                  ORDER BY c.ordinal DESC LIMIT 1)",
+            params![dataset.0,id,version], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional().map_err(database_error)
+    }
+}
+
+pub(super) fn issued_for_turn(
+    connection: &Connection,
+    dataset: &DatasetId,
+    game: &TacticalGame,
+    report: &str,
+    ply: u32,
+) -> Result<Option<TacticalPuzzleRef>, StoreError> {
+    active(connection, dataset)?;
+    let row = connection
+        .query_row(
+            "SELECT r.target_id,r.version FROM tactical_requests r
+         JOIN tactical_observations o ON o.id=r.observation_id
+         WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)=(?1,?2,?3,?4,?5,?6)
+             AND (r.attempt_id IS NOT NULL OR r.fulfilled=1)
+         ORDER BY r.id LIMIT 1",
+            params![
+                dataset.0,
+                game.game.source,
+                game.game.id,
+                game.learner,
+                report,
+                ply
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(database_error)?;
+    row.map(|(target, version)| {
+        Ok(TacticalPuzzleRef {
+            target: TargetId(target),
+            version: ContentVersion(decode_counter(version)?),
+        })
+    })
+    .transpose()
 }

@@ -504,6 +504,16 @@ impl Store for SqliteStore {
             .map_err(database_error)
     }
 
+    fn issued_tactical_request_for_turn(
+        &self,
+        dataset: &DatasetId,
+        game: &crate::TacticalGame,
+        report: &str,
+        ply: u32,
+    ) -> Result<Option<crate::TacticalPuzzleRef>, StoreError> {
+        tactical_analysis::issued_for_turn(&self.connection, dataset, game, report, ply)
+    }
+
     fn tactical_lead_in(
         &self,
         dataset: &DatasetId,

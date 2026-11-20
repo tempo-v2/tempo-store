@@ -96,6 +96,17 @@ pub trait Store {
         Ok(false)
     }
 
+    /// The original version remains authoritative once a request is issued.
+    fn issued_tactical_request_for_turn(
+        &self,
+        _dataset: &DatasetId,
+        _game: &crate::TacticalGame,
+        _report: &str,
+        _ply: u32,
+    ) -> Result<Option<crate::TacticalPuzzleRef>, StoreError> {
+        Err(StoreError::Unsupported("issued_tactical_request_for_turn"))
+    }
+
     fn tactical_lead_in(
         &self,
         _dataset: &DatasetId,

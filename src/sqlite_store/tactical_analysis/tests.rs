@@ -58,6 +58,7 @@ fn analysis(id: &str, target: Option<&TargetId>) -> TacticalAnalysis {
         error: None,
         observations: target
             .map(|target| TacticalObservation {
+                request_scope: TacticalRequestScope::Finding,
                 producer: None,
                 ply: 0,
                 motif: "hanging_material".into(),
@@ -823,6 +824,7 @@ fn retry_and_attribution_follow_explicit_position_contract() {
     let mut obsolete = member.clone();
     obsolete.revision = "0".into();
     result.observations.push(TacticalObservation {
+        request_scope: TacticalRequestScope::Finding,
         producer: Some(obsolete),
         ply: 0,
         motif: "fixture".into(),
