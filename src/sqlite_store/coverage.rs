@@ -1,29 +1,12 @@
 //! Durable Games forecasts, published against verified repertoire inputs.
 use super::{SqliteStore, database_error, game_model, game_relevance, row_values};
-use crate::{ProjectionBook, ProjectionScope, StoreError, store_error::conflict};
+use crate::{
+    CoverageSummary, ForecastGap, ProjectionBook, ProjectionScope, SavedCoverage, StoreError,
+    store_error::conflict,
+};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
-use serde::{Deserialize, Serialize};
 use tempo_chess::{OpponentGap, PositionKey};
 use tempo_types::DatasetId;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CoverageSummary {
-    pub request_id: String,
-    pub through_move: u8,
-    pub target_percent: u8,
-    pub covered: f64,
-    pub unresolved: f64,
-    pub positions: usize,
-    pub explorer_positions: usize,
-    pub maia_positions: usize,
-    pub scanned_at_ms: u64,
-}
-
-pub struct ForecastGap {
-    pub gap: OpponentGap,
-    pub probability: f64,
-    pub stale: bool,
-}
 
 impl SqliteStore {
     pub fn coverage_book(
@@ -40,11 +23,11 @@ impl SqliteStore {
         .pop())
     }
 
-    pub fn coverage_summary(
+    pub(super) fn read_coverage_summary(
         &self,
         dataset: &DatasetId,
         repertoire: &str,
-    ) -> Result<Option<(CoverageSummary, bool)>, StoreError> {
+    ) -> Result<Option<SavedCoverage>, StoreError> {
         let row: Option<(String, bool)> = self.connection.query_row(
             "SELECT summary, input.input_key IS NOT report.input_key OR input.state IS NOT 'verified'
              FROM repertoire_coverage AS report
@@ -53,11 +36,16 @@ impl SqliteStore {
             params![dataset.0, repertoire],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().map_err(database_error)?;
-        row.map(|(summary, stale)| Ok((row_values::decode(&summary)?, stale)))
-            .transpose()
+        row.map(|(summary, stale)| {
+            Ok(SavedCoverage {
+                summary: row_values::decode(&summary)?,
+                stale,
+            })
+        })
+        .transpose()
     }
 
-    pub fn forecast_gaps(
+    pub(super) fn read_forecast_gaps(
         &self,
         dataset: &DatasetId,
         repertoire: Option<&str>,
@@ -157,6 +145,7 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Store;
     use tempo_chess::Catalog;
     use tempo_learning::{LearningPolicy, StandardLearning};
 

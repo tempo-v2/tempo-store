@@ -87,4 +87,5 @@ pub use tactical_analysis::{
     TacticalTrainingStatus,
 };
 
-pub use sqlite_store::{CoverageSummary, ForecastGap};
+mod coverage;
+pub use coverage::{CoverageSummary, ForecastGap, SavedCoverage};

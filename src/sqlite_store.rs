@@ -35,7 +35,6 @@ use save_snapshot::save_snapshot;
 pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
-pub use coverage::{CoverageSummary, ForecastGap};
 
 const SCHEMA_VERSION: i64 = 16;
 const COVERAGE_SCHEMA: &str = include_str!("sqlite_store/coverage.sql");
@@ -983,6 +982,22 @@ impl Store for SqliteStore {
     ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
         let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.opponent_gaps");
         game_relevance::gaps(&self.connection, dataset)
+    }
+
+    fn coverage_summary(
+        &self,
+        dataset: &DatasetId,
+        repertoire: &str,
+    ) -> Result<Option<crate::SavedCoverage>, StoreError> {
+        self.read_coverage_summary(dataset, repertoire)
+    }
+
+    fn forecast_gaps(
+        &self,
+        dataset: &DatasetId,
+        repertoire: Option<&str>,
+    ) -> Result<Vec<crate::ForecastGap>, StoreError> {
+        self.read_forecast_gaps(dataset, repertoire)
     }
 
     fn game_backfill_state(
