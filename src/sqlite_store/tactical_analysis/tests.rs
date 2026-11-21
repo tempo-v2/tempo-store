@@ -777,7 +777,7 @@ fn remove_v15_projection(store: &SqliteStore) {
 }
 
 #[test]
-fn schema_11_migration_is_additive_and_an_interrupted_attempt_rolls_back() {
+fn schema_13_migration_is_additive_and_an_interrupted_attempt_rolls_back() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");
     let mut store = SqliteStore::create(
@@ -847,7 +847,7 @@ fn schema_11_migration_is_additive_and_an_interrupted_attempt_rolls_back() {
     assert_eq!(upgraded.snapshot().unwrap(), before);
     assert_eq!(
         super::super::schema_version(&upgraded.connection).unwrap(),
-        14
+        super::super::SCHEMA_VERSION
     );
     drop(upgraded);
     assert_eq!(
@@ -1283,4 +1283,339 @@ fn legacy_finding_preserves_binding_previously_moved_to_a_decision() {
     let after = store.snapshot().unwrap();
     assert_eq!(after.catalog, before.catalog);
     assert_eq!(after.learning, before.learning);
+}
+
+/// The counters track actual SQLite row writes, including no-op rewrites.
+fn tactical_write_counts(connection: &Connection) -> BTreeMap<String, u64> {
+    let mut query = connection
+        .prepare("SELECT name, count(*) FROM tactical_write_probe GROUP BY name")
+        .unwrap();
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn probe_tactical_writes(connection: &Connection) {
+    connection
+        .execute_batch("CREATE TEMP TABLE tactical_write_probe(name TEXT NOT NULL);")
+        .unwrap();
+    for table in [
+        "content_history",
+        "current_content",
+        "learning",
+        "attempts",
+        "assessments",
+        "receipts",
+        "repertoire_lines",
+        "line_targets",
+        "games",
+        "game_comparisons",
+        "tactical_requests",
+        "tactical_observations",
+        "tactical_analyses",
+    ] {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            connection
+                .execute_batch(&format!(
+                "CREATE TEMP TRIGGER track_{table}_{operation} AFTER {operation} ON main.{table}
+                 BEGIN INSERT INTO tactical_write_probe VALUES('{table}'); END;"
+            ))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
+    use rusqlite::StatementStatus;
+    use tempo_chess::{Catalog, prepare_tactical_puzzle};
+
+    let lookup_work = |db: &Connection, dataset: &DatasetId, lookup: &tempo_chess::TacticLookup| {
+        let identity = encode(&lookup.identity).unwrap();
+        let tokens = encode(&lookup.source_tokens).unwrap();
+        let input = params![lookup.target.0, identity, tokens, dataset.0];
+        let mut explain = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", tactical_targets::MATCHES))
+            .unwrap();
+        let plan: Vec<String> = explain
+            .query_map(input, |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step
+                .contains("SEARCH tactical_identities USING INDEX tactical_identities_exact")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH tactical_sources USING")
+                    && step.contains("token=?")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH c USING") && step.contains("target_id=?")),
+            "{plan:?}"
+        );
+        let mut query = db.prepare(tactical_targets::MATCHES).unwrap();
+        let decoded: Vec<tempo_chess::ContentItem> = query
+            .query_map(input, |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| decode(&row.unwrap()).unwrap())
+            .collect();
+        (
+            decoded,
+            query.get_status(StatementStatus::VmStep),
+            query.get_status(StatementStatus::FullscanStep),
+        )
+    };
+
+    let mut work = Vec::new();
+    for (items, versions, attempts, assessments, receipts, games) in
+        [(3, 4, 5, 6, 7, 8), (192, 227, 173, 219, 353, 151)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, exact) = fixture(&dir.path().join("scoped.sqlite"));
+        let basis = store.tactical_acceptance_basis().unwrap();
+        let mut catalog = store.content_state().unwrap().catalog;
+        let unrelated = compile_tactics(&[TacticRecord {
+            namespace: "growth".into(),
+            source_id: "unrelated-line".into(),
+            solver_fen: START_FEN.into(),
+            solution: vec!["c2c4".into()],
+            label: "Different solution at the same position".into(),
+            provenance: vec![],
+        }])
+        .unwrap()
+        .items
+        .into_values()
+        .next()
+        .unwrap();
+        let mut extra_learning = Vec::new();
+        for index in 0..items {
+            let mut item = unrelated.clone();
+            item.target = TargetId(format!("unrelated-{index}"));
+            item.version = ContentVersion(1000);
+            extra_learning.push(Write::Learning {
+                target: item.target.clone(),
+                state: Default::default(),
+            });
+            catalog.items.insert(item.target.clone(), item);
+        }
+        let mut writes = vec![Write::Catalog(catalog)];
+        writes.extend(extra_learning);
+        store
+            .commit(Commit {
+                expected_dataset: basis.dataset.clone(),
+                expected_revision: basis.revision,
+                writes,
+            })
+            .unwrap();
+        game(&store, "focus");
+        for index in 0..games {
+            game(&store, &format!("unrelated-game-{index}"));
+        }
+        // A deliberately undecodable payload is a read probe: materializing any
+        // unrelated record from these tables would fail acceptance.
+        let high = ContentVersion(1000).0.to_be_bytes();
+        let tx = store.connection.transaction().unwrap();
+        for version in 1..=versions {
+            tx.execute(
+                "INSERT INTO content_history(dataset_id,target_id,version,item)
+                 VALUES('dataset','unrelated-0',?1,'{}')",
+                [(version as u64).to_be_bytes().as_slice()],
+            )
+            .unwrap();
+        }
+        tx.execute_batch(
+            "UPDATE current_content SET item='{}' WHERE target_id LIKE 'unrelated-%';
+             UPDATE learning SET state='{}' WHERE target_id LIKE 'unrelated-%';",
+        )
+        .unwrap();
+        for index in 0..attempts {
+            tx.execute(
+                "INSERT INTO attempts VALUES(?1,'dataset','unrelated-0',?2,'{}')",
+                params![format!("unrelated-attempt-{index}"), high.as_slice()],
+            )
+            .unwrap();
+        }
+        for index in 0..assessments {
+            tx.execute(
+                "INSERT INTO assessments VALUES(NULL,'dataset','unrelated-0',?1,NULL,'fixture',?2,'{}')",
+                params![high.as_slice(), format!("unrelated-assessment-{index}")]
+            ).unwrap();
+        }
+        for index in 0..receipts {
+            tx.execute(
+                "INSERT INTO receipts VALUES(?1,NULL,'{}','{}')",
+                [format!("unrelated-receipt-{index}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        probe_tactical_writes(&store.connection);
+
+        let basis = store.tactical_acceptance_basis().unwrap();
+        let new = prepare_tactical_puzzle(START_FEN, &"d2d4".into(), &[]).unwrap();
+        let (decoded, new_steps, new_scans) =
+            lookup_work(&store.connection, &basis.dataset, &new.lookup());
+        assert!(decoded.is_empty());
+        let items = store
+            .tactical_content_matches(&basis.dataset, &new.lookup())
+            .unwrap();
+        assert!(items.is_empty());
+        let plan = new.plan(&Catalog::default()).unwrap();
+        let target = plan.target;
+        let item = plan.content.catalog.items[&target].clone();
+        let introduction = DailyLearning::introduce_capture(
+            &Default::default(),
+            StudyTime {
+                day: StudyDay(10),
+                unix_ms: 1_000,
+            },
+        )
+        .unwrap();
+        let first = analysis("focus", Some(&target));
+        let accepted = store
+            .commit_tactical_analysis(
+                TacticalCommit {
+                    expected_dataset: basis.dataset.clone(),
+                    expected_revision: basis.revision,
+                    targets: [(
+                        target.clone(),
+                        TacticalTargetChange {
+                            content: Some(item),
+                            introduction: Some(introduction),
+                        },
+                    )]
+                    .into(),
+                },
+                &first,
+            )
+            .unwrap();
+        assert_eq!((accepted.new_observations, accepted.new_requests), (1, 1));
+        assert_eq!(
+            tactical_write_counts(&store.connection),
+            [
+                ("content_history".into(), 1),
+                ("current_content".into(), 1),
+                ("learning".into(), 1),
+                ("tactical_analyses".into(), 1),
+                ("tactical_observations".into(), 1),
+                ("tactical_requests".into(), 1),
+            ]
+            .into()
+        );
+
+        store
+            .connection
+            .execute_batch("DELETE FROM tactical_write_probe;")
+            .unwrap();
+        let revised = prepare_tactical_puzzle(START_FEN, &"e2e4".into(), &[]).unwrap();
+        let (decoded, match_steps, match_scans) =
+            lookup_work(&store.connection, &basis.dataset, &revised.lookup());
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].target, exact);
+        work.push((new_steps, new_scans, match_steps, match_scans));
+        let mut second = analysis("focus", Some(&exact));
+        second.analysis_version = "revision".into();
+        let report_epoch = store.tactical_report_generation(&basis.dataset).unwrap();
+        let commit = TacticalCommit {
+            expected_dataset: basis.dataset.clone(),
+            expected_revision: accepted.revision,
+            targets: BTreeMap::new(),
+        };
+        let amended = store
+            .commit_tactical_analysis(commit.clone(), &second)
+            .unwrap();
+        assert_eq!((amended.new_observations, amended.new_requests), (0, 0));
+        assert_eq!(
+            store.pending_tactical_requests(&basis.dataset).unwrap()[0].target,
+            target
+        );
+        assert_eq!(
+            tactical_write_counts(&store.connection),
+            [
+                ("tactical_analyses".into(), 1),
+                ("tactical_observations".into(), 2),
+            ]
+            .into()
+        );
+        let amended_epoch = store.tactical_report_generation(&basis.dataset).unwrap();
+        assert!(amended_epoch.evidence > report_epoch.evidence);
+        assert_eq!(amended_epoch.archive, report_epoch.archive);
+
+        store
+            .connection
+            .execute_batch("DELETE FROM tactical_write_probe;")
+            .unwrap();
+        assert!(
+            store
+                .commit_tactical_analysis(commit.clone(), &second)
+                .unwrap()
+                .replayed
+        );
+        assert!(tactical_write_counts(&store.connection).is_empty());
+        second.analysis_version = "stale".into();
+        assert!(matches!(
+            store.commit_tactical_analysis(commit, &second),
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(tactical_write_counts(&store.connection).is_empty());
+        assert_eq!(
+            store.tactical_report_generation(&basis.dataset).unwrap(),
+            amended_epoch
+        );
+    }
+    assert_eq!(work[0], work[1]);
+    println!("Lookup VM steps/full-scan steps at both sizes: {work:?}");
+}
+
+#[test]
+fn tactical_schema_15_backfills_lookup_and_preserves_schema_14_history() {
+    use tempo_chess::prepare_tactical_puzzle;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("schema-14.sqlite");
+    let (mut store, target) = fixture(&path);
+    game(&store, "before");
+    let first = analysis("before", Some(&target));
+    accept(&mut store, &first, &target);
+    let before = store.snapshot().unwrap();
+    let request = store
+        .pending_tactical_requests(&before.dataset)
+        .unwrap()
+        .remove(0);
+    let issued = issue_request(&mut store, &request, "pinned-at-migration");
+    let before = store.snapshot().unwrap();
+
+    remove_v15_projection(&store);
+    drop(store);
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.snapshot().unwrap(), before);
+    let lookup = prepare_tactical_puzzle(START_FEN, &"e2e4".into(), &[])
+        .unwrap()
+        .lookup();
+    let matched = store
+        .tactical_content_matches(&before.dataset, &lookup)
+        .unwrap();
+    assert_eq!(matched, vec![before.catalog.items[&target].clone()]);
+    assert!(
+        store
+            .has_pending_tactical_request_for_attempt(&before.dataset, &issued.attempt.id)
+            .unwrap()
+    );
+    assert!(accept(&mut store, &first, &target).replayed);
+    assert_eq!(store.snapshot().unwrap(), before);
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap(),
+        0
+    );
 }

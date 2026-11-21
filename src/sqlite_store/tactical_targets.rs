@@ -14,7 +14,7 @@ use tempo_chess::{Catalog, ContentItem, TacticLookup};
 use tempo_learning::LearningState;
 use tempo_types::{ContentVersion, DatasetId, Revision, TargetId};
 
-const MATCHES: &str = "WITH matched(target_id) AS (
+pub(super) const MATCHES: &str = "WITH matched(target_id) AS (
          SELECT target_id FROM current_content WHERE target_id=?1
          UNION
          SELECT target_id FROM tactical_identities WHERE identity=?2
