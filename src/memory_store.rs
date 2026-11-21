@@ -1,8 +1,10 @@
 //! MemoryStore and its usage scenarios.
 
+use crate::store_error::conflict;
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentState, PortableGameEvidence, Snapshot, Store, StoreError, StudyScope, StudyState,
+    Commit, ContentState, PortableGameEvidence, Snapshot, Store, StoreError, StudyOrderingWrite,
+    StudyScope, StudyState,
 };
 use tempo_chess::Catalog;
 use tempo_learning::SchedulerSettings;
@@ -25,6 +27,7 @@ pub struct MemoryStore {
     state: Snapshot,
     content_revision: Revision,
     fail_next_commit: bool,
+    regular_review_owed: bool,
 }
 impl MemoryStore {
     pub fn new(
@@ -35,6 +38,7 @@ impl MemoryStore {
         Ok(Self {
             state: initial_snapshot(dataset, catalog, policy)?,
             fail_next_commit: false,
+            regular_review_owed: false,
             content_revision: Revision(0),
         })
     }
@@ -45,6 +49,38 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
+    fn regular_review_owed(&self, dataset: &DatasetId) -> Result<bool, StoreError> {
+        if *dataset != self.state.dataset {
+            return Err(conflict("daily ordering dataset changed"));
+        }
+        Ok(self.regular_review_owed)
+    }
+
+    fn commit_daily_issuance(
+        &mut self,
+        commit: Commit,
+        _scope: StudyScope<'_>,
+        immediate_request: Option<u64>,
+        ordering: StudyOrderingWrite,
+    ) -> Result<Revision, StoreError> {
+        if immediate_request.is_some() {
+            return Err(StoreError::Unsupported(
+                "bind immediate recall in MemoryStore",
+            ));
+        }
+        commit.daily_issued_attempt()?;
+        if self.state.active_attempt.is_some() {
+            return Err(conflict("finish the active attempt before daily issuance"));
+        }
+        let revision = self.commit(commit)?;
+        match ordering {
+            StudyOrderingWrite::Preserve => {}
+            StudyOrderingWrite::OweRegularReview => self.regular_review_owed = true,
+            StudyOrderingWrite::SatisfyRegularReview => self.regular_review_owed = false,
+        }
+        Ok(revision)
+    }
+
     fn has_pending_tactical_request_for_attempt(
         &self,
         dataset: &DatasetId,
@@ -108,6 +144,9 @@ impl Store for MemoryStore {
                     .checked_add(1)
                     .ok_or_else(|| StoreError::Invalid("content revision exhausted".into()))?,
             );
+        }
+        if self.state.dataset != staged.dataset {
+            self.regular_review_owed = false;
         }
         self.state = staged;
         Ok(self.state.revision)

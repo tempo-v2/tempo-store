@@ -9,6 +9,7 @@ use tempo_chess::{Catalog, RepertoireLine};
 use tempo_types::{AttemptId, DatasetId, Revision, TargetId};
 
 pub(super) fn load_snapshot(transaction: &Transaction<'_>) -> Result<Snapshot, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.load_snapshot.load_snapshot");
     let (dataset, revision, active, policy) = transaction
         .query_row(
             "SELECT dataset_id, revision, active_attempt_id, policy FROM store_state WHERE singleton = 1",
@@ -85,6 +86,7 @@ pub(super) fn load_snapshot(transaction: &Transaction<'_>) -> Result<Snapshot, S
 }
 
 pub(super) fn load_lines(transaction: &Transaction<'_>) -> Result<Vec<RepertoireLine>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.load_snapshot.load_lines");
     let mut lines: Vec<_> = read_rows(
         transaction,
         "SELECT id, repertoire FROM repertoire_lines ORDER BY ordinal",

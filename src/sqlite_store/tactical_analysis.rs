@@ -2,19 +2,20 @@
 const PERSONAL_DECISION_KIND: &str = tempo_chess::TacticalKind::PersonalTactics.code();
 
 use super::{
-    database_error, game_evidence,
-    load_snapshot::load_snapshot,
-    load_study,
+    database_error, game_evidence, load_study,
     row_values::{decode, decode_counter, encode},
     save_snapshot::save_snapshot,
+    tactical_targets,
 };
 use crate::{
+    diagnostics::{Operation, timed},
     store_error::{conflict, invalid},
     transaction::stage_commit,
     *,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::{borrow::Cow, collections::BTreeSet};
 use tempo_study::AttemptStatus;
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, TargetId};
 
@@ -49,11 +50,54 @@ fn has_position_findings(status: TacticalAnalysisStatus) -> bool {
     )
 }
 
+// Old receipts serialize just the flattened acceptance and use the full
+// observation digest. A retained request did not adopt the new proposal.
+// Replay verifies detector evidence independently of any changes in how the
+// catalog resolves that proposal. Keep the original serialized field name.
+#[derive(Deserialize, Serialize)]
+struct TacticalAcceptanceReceipt {
+    #[serde(flatten)]
+    acceptance: TacticalAcceptance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retained_findings: Vec<usize>,
+    #[serde(default)]
+    pinned_bindings: bool,
+}
+
+fn payload_fingerprint(
+    analysis: &TacticalAnalysis,
+    retained_findings: &[usize],
+) -> Result<String, StoreError> {
+    let mut observations = Cow::Borrowed(analysis.observations.as_slice());
+    for &index in retained_findings {
+        let finding = observations
+            .to_mut()
+            .get_mut(index)
+            .ok_or_else(|| conflict("analysis identity reused for different results"))?;
+        if finding.train.take().is_none() {
+            return Err(conflict("analysis identity reused for different results"));
+        }
+    }
+    // Acceptance time is delivery metadata, not part of the immutable analysis result.
+    Ok(blake3::hash(
+        encode(&(
+            analysis.decisions_scanned,
+            analysis.status,
+            &analysis.error,
+            &*observations,
+        ))?
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string())
+}
+
 pub(super) fn accept(
     connection: &mut Connection,
-    commit: Commit,
+    commit: TacticalCommit,
     analysis: &TacticalAnalysis,
 ) -> Result<TacticalAcceptance, StoreError> {
+    let _trace = Operation::new("sqlite.tactical_analysis.accept");
     if [
         &analysis.source,
         &analysis.game_id,
@@ -64,55 +108,35 @@ pub(super) fn accept(
     .iter()
     .any(|value| value.trim().is_empty())
         || analysis.learner != analysis.learner.trim().to_lowercase()
-        || commit
-            .writes
-            .iter()
-            .any(|write| !matches!(write, Write::Catalog(_) | Write::Learning { .. }))
     {
-        return Err(invalid(
-            "expected an addressed tactical analysis and content/learning writes",
-        ));
+        return Err(invalid("expected an addressed tactical analysis"));
     }
     if !has_position_findings(analysis.status)
         && (!analysis.observations.is_empty()
-            || !commit.writes.is_empty()
+            || !commit.targets.is_empty()
             || analysis.decisions_scanned != 0)
     {
         return Err(invalid(
             "failed analysis cannot apply observations or training",
         ));
     }
-    let mut keys = BTreeSet::new();
-    for observation in &analysis.observations {
-        if observation.motif.is_empty()
-            || observation.outcome.is_empty()
-            || !keys.insert((observation.ply, &observation.motif, &observation.producer))
-            || !serde_json::from_str::<serde_json::Value>(&observation.details_json)
-                .is_ok_and(|value| value.is_object())
-        {
-            return Err(invalid("invalid or duplicate tactical observation"));
-        }
+    let tx = timed("sqlite.begin", || {
+        connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    })
+    .map_err(database_error)?;
+    let dataset = &commit.expected_dataset;
+    let (current_dataset, current_revision) = tactical_targets::revision(&tx)?;
+    if &current_dataset != dataset {
+        return Err(conflict("tactical analysis dataset changed"));
     }
-    // Acceptance time is delivery metadata, not part of the immutable analysis result.
-    let digest = blake3::hash(
-        encode(&(
-            analysis.decisions_scanned,
-            analysis.status,
-            &analysis.error,
-            &analysis.observations,
-        ))?
-        .as_bytes(),
-    )
-    .to_hex()
-    .to_string();
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(database_error)?;
-    let dataset = &commit.expected_dataset.clone();
-    active(&tx, dataset)?;
     let position_id = analysis.position.map_or(0, |run| run.id);
     let deeper = analysis.position.is_some_and(|run| run.deeper);
     let ply = analysis.position.map(|run| run.ply);
+    let occurrence_scope = if ply.is_some() {
+        "o.ply=?6"
+    } else {
+        "?6 IS NULL"
+    };
     if let Some(ply) = ply
         && analysis
             .observations
@@ -128,13 +152,59 @@ pub(super) fn accept(
             analysis.analysis_version,analysis.game_fingerprint,position_id,deeper], |r| Ok((r.get(0)?,r.get(1)?))
     ).optional().map_err(database_error)?;
     if let Some((fingerprint, payload)) = prior {
-        if fingerprint != digest {
-            return Err(conflict("analysis identity reused for different results"));
+        let receipt: TacticalAcceptanceReceipt = decode(&payload)?;
+        if fingerprint != payload_fingerprint(analysis, &receipt.retained_findings)? {
+            // Older application versions omitted the proposal when a Decision's
+            // issued puzzle differed. Reconstruct that digest shape only for
+            // old receipts and still verify every detector-evidence field.
+            let mut legacy_omissions = receipt.retained_findings;
+            if receipt.pinned_bindings {
+                return Err(conflict("analysis identity reused for different results"));
+            }
+            for (index, observation) in analysis.observations.iter().enumerate() {
+                if let Some(proposal) = &observation.train
+                    && observation.request_scope == TacticalRequestScope::Decision
+                    && binding_for(&tx, dataset, analysis, observation)?
+                        .is_some_and(|binding| binding.puzzle != *proposal)
+                {
+                    legacy_omissions.push(index);
+                }
+            }
+            if fingerprint != payload_fingerprint(analysis, &legacy_omissions)? {
+                return Err(conflict("analysis identity reused for different results"));
+            }
         }
-        let mut saved: TacticalAcceptance = decode(&payload)?;
+        let mut saved = receipt.acceptance;
         saved.replayed = true;
         saved.new_request_targets.clear();
         return Ok(saved);
+    }
+    if current_revision != commit.expected_revision {
+        return Err(conflict("tactical analysis basis changed"));
+    }
+    let mut keys = BTreeSet::new();
+    let mut proposed_at_ply = std::collections::BTreeMap::new();
+    for observation in &analysis.observations {
+        let producer = observation_producer(analysis, observation);
+        if observation.motif.is_empty()
+            || observation.outcome.is_empty()
+            || !keys.insert((observation.ply, &observation.motif, producer))
+            || !serde_json::from_str::<serde_json::Value>(&observation.details_json)
+                .is_ok_and(|value| value.is_object())
+        {
+            return Err(invalid("invalid or duplicate tactical observation"));
+        }
+        if observation.train.is_some() {
+            let decision = observation.request_scope == TacticalRequestScope::Decision;
+            if proposed_at_ply
+                .insert(observation.ply, decision)
+                .is_some_and(|prior_decision| decision || prior_decision)
+            {
+                return Err(invalid(
+                    "overlapping training proposals for a tactical decision",
+                ));
+            }
+        }
     }
     let game: Option<(String, String, String)> = tx
         .query_row(
@@ -186,25 +256,47 @@ pub(super) fn accept(
             return Err(conflict("position is no longer pending"));
         }
     }
-    let (revision, next) = if commit.writes.is_empty()
-        && analysis.observations.iter().all(|row| row.train.is_none())
-    {
-        let counter: Vec<u8> = tx
-            .query_row(
-                "SELECT revision FROM store_state WHERE singleton=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(database_error)?;
-        (Revision(decode_counter(counter)?), None)
-    } else {
-        let previous = load_snapshot(&tx)?;
-        let next = stage_commit(&previous, commit)?;
-        if previous.active_attempt != next.active_attempt {
-            return Err(invalid("analysis must preserve the active Study attempt"));
+    let bindings_trace = Operation::new("sqlite.tactical_analysis.read_bindings");
+    let mut bindings = Vec::with_capacity(analysis.observations.len());
+    let mut new_targets = BTreeSet::new();
+    for observation in &analysis.observations {
+        let binding = if let Some(proposal) = &observation.train {
+            let binding = binding_for(&tx, dataset, analysis, observation)?;
+            if binding.is_none() {
+                new_targets.insert(&proposal.target);
+            }
+            binding
+        } else {
+            None
+        };
+        bindings.push(binding);
+    }
+    drop(bindings_trace);
+    let writes_trace = Operation::new("sqlite.tactical_analysis.write_effects");
+    let mut changed_content = false;
+    for (target, change) in &commit.targets {
+        if !new_targets.contains(target) {
+            return Err(conflict(
+                "tactical writes require a new training binding for their target",
+            ));
         }
-        save_snapshot(&tx, Some(&previous), &next)?;
-        (next.revision, Some(next))
+        changed_content |= tactical_targets::apply_change(&tx, dataset, target, change)?;
+    }
+    // Preserve the Study revision fence used for acceptances carrying proposals.
+    let revision = if analysis.observations.iter().any(|row| row.train.is_some()) {
+        let revision = Revision(
+            current_revision
+                .0
+                .checked_add(1)
+                .ok_or_else(|| invalid("store revision exhausted"))?,
+        );
+        tx.execute(
+            "UPDATE store_state SET revision=?1,content_revision=content_revision+?2 WHERE singleton=1",
+            params![revision.0.to_be_bytes().as_slice(), changed_content],
+        ).map_err(database_error)?;
+        revision
+    } else {
+        current_revision
     };
     let mut acceptance = TacticalAcceptance {
         revision,
@@ -217,8 +309,8 @@ pub(super) fn accept(
         // Retain audit rows while letting a complete scan replace the current
         // findings, including a changed game under the same report version.
         tx.execute(
-            "UPDATE tactical_observations SET current=0 WHERE
-            (dataset_id,source,game_id,learner,report)=(?1,?2,?3,?4,?5) AND (?6 IS NULL OR ply=?6)",
+            &format!("UPDATE tactical_observations AS o SET current=0 WHERE
+            (dataset_id,source,game_id,learner,report)=(?1,?2,?3,?4,?5) AND current=1 AND {occurrence_scope}"),
             params![
                 dataset.0,
                 analysis.source,
@@ -231,7 +323,8 @@ pub(super) fn accept(
         .map_err(database_error)?;
     }
     let mut preserved_requests = BTreeSet::new();
-    for observation in &analysis.observations {
+    let mut retained_findings = Vec::new();
+    for (index, (observation, binding)) in analysis.observations.iter().zip(bindings).enumerate() {
         let producer_id = observation
             .producer
             .as_ref()
@@ -262,70 +355,30 @@ pub(super) fn accept(
                 |r| r.get(0),
             )
             .map_err(database_error)?;
-        tx.execute("UPDATE tactical_observations SET analysis_version=?2,outcome=?3,details_json=?4,producer=?5,current=1 WHERE id=?1",
-            params![id,analysis.analysis_version,observation.outcome,observation.details_json,producer]).map_err(database_error)?;
-        let mut retain_issued = false;
-        if observation.request_scope == TacticalRequestScope::Decision
-            && observation.train.is_some()
-        {
-            let prior: Option<(u64, bool, String, Vec<u8>)> = tx.query_row(
-                "SELECT r.id, (r.attempt_id IS NOT NULL OR r.fulfilled=1), r.target_id, r.version
-                 FROM tactical_requests r JOIN tactical_observations prior ON prior.id=r.observation_id
-                 WHERE (prior.dataset_id,prior.source,prior.game_id,prior.learner,prior.report,prior.ply)
-                       =(?1,?2,?3,?4,?5,?6)
-                 ORDER BY (r.attempt_id IS NOT NULL OR r.fulfilled=1) DESC, (r.observation_id=?7) DESC, r.id LIMIT 1",
-                params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,observation.ply,id],
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
-            ).optional().map_err(database_error)?;
-            if let Some((request_id, issued, target, version)) = prior {
-                retain_issued = issued;
-                if issued {
-                    let proposed = observation.train.as_ref().expect("request proposed");
-                    if proposed.target.0 != target || proposed.version.0 != decode_counter(version)?
-                    {
-                        return Err(conflict(
-                            "the tactical decision already has an issued request",
-                        ));
-                    }
-                    preserved_requests.insert(request_id);
-                    tx.execute(
-                        "UPDATE tactical_requests SET cancelled=0 WHERE id=?1",
-                        [request_id],
-                    )
-                    .map_err(database_error)?;
-                } else {
-                    tx.execute(
-                        "UPDATE tactical_requests SET observation_id=?1 WHERE id=?2",
-                        params![id, request_id],
-                    )
-                    .map_err(database_error)?;
-                }
-            }
+        if inserted == 0 {
+            tx.execute("UPDATE tactical_observations SET analysis_version=?2,outcome=?3,details_json=?4,producer=?5,current=1 WHERE id=?1",
+                params![id,analysis.analysis_version,observation.outcome,observation.details_json,producer]).map_err(database_error)?;
         }
-        if retain_issued {
+        if let Some(binding) = binding {
+            // A newer report may present a different answer. Preserve the
+            // original observation address and cancellation state, as well as
+            // the accepted target/version/attempt.
+            let superseded = observation.request_scope == TacticalRequestScope::Decision
+                && binding.issued_or_fulfilled
+                && observation.train.as_ref() != Some(&binding.puzzle);
+            if superseded && analysis.status == TacticalAnalysisStatus::Complete {
+                tx.execute(
+                    "UPDATE tactical_requests SET cancelled=1 WHERE id=?1 AND fulfilled=0 AND cancelled=0",
+                    [binding.id],
+                )
+                .map_err(database_error)?;
+            }
+            preserved_requests.insert(binding.id);
+            retained_findings.push(index);
             continue;
         }
         if let Some(puzzle) = &observation.train {
-            let next = next
-                .as_ref()
-                .ok_or_else(|| invalid("training requires staged content and learning"))?;
-            let item = next
-                .catalog
-                .items
-                .get(&puzzle.target)
-                .filter(|item| {
-                    item.active()
-                        && !item.definition.is_repertoire()
-                        && item.version == puzzle.version
-                })
-                .ok_or_else(|| {
-                    invalid("training request needs an active current-version tactic")
-                })?;
-            if !next.learning[&item.target].introduced {
-                return Err(invalid(
-                    "training request requires Learning's introduction transition",
-                ));
-            }
+            tactical_targets::require_target(&tx, dataset, &puzzle.target, puzzle.version)?;
             let inserted_request = tx.execute(
                 "INSERT INTO tactical_requests(observation_id,dataset_id,target_id,version,accepted_at_ms)
                  VALUES(?1,?2,?3,?4,?5) ON CONFLICT(observation_id) DO NOTHING",
@@ -335,22 +388,10 @@ pub(super) fn accept(
             if inserted_request != 0 {
                 acceptance.new_request_targets.push(puzzle.target.clone());
             }
-            // An unissued request may follow a revised accepted solution. An issued
-            // or fulfilled request retains the exact content it was bound to.
-            tx.execute(
-                "UPDATE tactical_requests SET target_id=?2,version=?3,cancelled=0
-                WHERE observation_id=?1 AND attempt_id IS NULL AND fulfilled=0",
-                params![
-                    id,
-                    puzzle.target.0,
-                    puzzle.version.0.to_be_bytes().as_slice()
-                ],
-            )
-            .map_err(database_error)?;
         } else if analysis.status == TacticalAnalysisStatus::Complete {
             tx.execute(
                 "UPDATE tactical_requests SET cancelled=1 WHERE observation_id=?1
-                AND fulfilled=0",
+                AND fulfilled=0 AND cancelled=0",
                 [id],
             )
             .map_err(database_error)?;
@@ -358,11 +399,14 @@ pub(super) fn accept(
     }
     if analysis.status == TacticalAnalysisStatus::Complete {
         // Retiring future issuance never changes the issued attempt or its receipts.
-        let mut prior = tx.prepare(
-            "SELECT r.id FROM tactical_requests r JOIN tactical_observations o ON o.id=r.observation_id
+        let mut prior = tx
+            .prepare(&format!(
+                "SELECT r.id FROM tactical_observations o
+             CROSS JOIN tactical_requests r ON o.id=r.observation_id
              WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.report)=(?1,?2,?3,?4,?5)
-               AND o.current=0 AND (?6 IS NULL OR o.ply=?6) AND r.fulfilled=0"
-        ).map_err(database_error)?;
+               AND o.current=0 AND {occurrence_scope} AND r.fulfilled=0 AND r.cancelled=0"
+            ))
+            .map_err(database_error)?;
         let ids = prior
             .query_map(
                 params![
@@ -390,15 +434,22 @@ pub(super) fn accept(
     }
     acceptance.new_request_targets.sort();
     acceptance.new_request_targets.dedup();
+    let digest = payload_fingerprint(analysis, &retained_findings)?;
+    let receipt = TacticalAcceptanceReceipt {
+        acceptance,
+        retained_findings,
+        pinned_bindings: true,
+    };
     tx.execute("INSERT INTO tactical_analyses(dataset_id,source,game_id,learner,report,analysis_version,
         game_fingerprint,status,analyzed_at_ms,decisions_scanned,payload_fingerprint,error,acceptance,position_id,deeper)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![dataset.0,analysis.source,analysis.game_id,analysis.learner,analysis.report,
             analysis.analysis_version,analysis.game_fingerprint,status_name(analysis.status),
-            analysis.analyzed_at_ms,analysis.decisions_scanned,digest,analysis.error,encode(&acceptance)?,position_id,deeper]
+            analysis.analyzed_at_ms,analysis.decisions_scanned,digest,analysis.error,encode(&receipt)?,position_id,deeper]
     ).map_err(database_error)?;
-    tx.commit().map_err(database_error)?;
-    Ok(acceptance)
+    drop(writes_trace);
+    timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
+    Ok(receipt.acceptance)
 }
 
 pub(super) fn pending_games(
@@ -511,75 +562,61 @@ pub(super) fn pending_requests(
         .collect()
 }
 
-pub(super) fn issue(
+pub(super) fn issue_daily(
     connection: &mut Connection,
     commit: Commit,
     scope: StudyScope<'_>,
-    request_id: u64,
+    immediate_request: Option<u64>,
+    ordering: StudyOrderingWrite,
 ) -> Result<Revision, StoreError> {
-    if commit
-        .writes
-        .iter()
-        .any(|write| !matches!(write, Write::Issue(_) | Write::Active(_)))
+    let record = commit.daily_issued_attempt()?;
+    if immediate_request.is_some()
+        && !matches!(record.mode, ActivityMode::Test | ActivityMode::Practice)
     {
-        return Err(invalid(
-            "immediate issuance may only issue and activate one attempt",
-        ));
-    }
-    let issued: Vec<_> = commit
-        .writes
-        .iter()
-        .filter_map(|write| {
-            if let Write::Issue(record) = write {
-                Some(record)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let [record] = issued.as_slice() else {
-        return Err(invalid("immediate recall requires exactly one new attempt"));
-    };
-    if !matches!(record.mode, ActivityMode::Test | ActivityMode::Practice) {
         return Err(invalid("immediate recall must use blind Test or Practice"));
     }
-    let record = (*record).clone();
+    let binding = immediate_request.map(|request| (request, record.attempt.id.clone()));
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
     let state = load_study::load_study(&tx, scope)?;
     if state.active_attempt.is_some() {
-        return Err(conflict(
-            "finish the active attempt before immediate recall",
-        ));
+        return Err(conflict("finish the active attempt before daily issuance"));
     }
     let previous = load_study::staging_image(state);
     let next = stage_commit(&previous, commit)?;
-    if next.active_attempt.as_ref() != Some(&record.attempt.id) {
-        return Err(invalid("immediate attempt must become active"));
-    }
     save_snapshot(&tx, Some(&previous), &next)?;
-    let changed = tx
-        .execute(
-            "UPDATE tactical_requests SET attempt_id=?2 WHERE id=?1 AND dataset_id=?3
-        AND target_id=?4 AND version=?5 AND fulfilled=0 AND cancelled=0 AND attempt_id IS NULL",
-            params![
-                request_id,
-                record.attempt.id.0,
-                next.dataset.0,
-                record.attempt.target.0,
-                record.attempt.content_version.0.to_be_bytes().as_slice()
-            ],
-        )
-        .map_err(database_error)?;
-    if changed != 1 {
-        return Err(conflict("immediate recall request changed before issuance"));
+    if let Some((request_id, id)) = binding {
+        let record = &next.attempts[&id];
+        let changed = tx
+            .execute(
+                "UPDATE tactical_requests SET attempt_id=?2 WHERE id=?1 AND dataset_id=?3
+                 AND target_id=?4 AND version=?5 AND fulfilled=0 AND cancelled=0 AND attempt_id IS NULL",
+                params![
+                    request_id,
+                    record.attempt.id.0,
+                    next.dataset.0,
+                    record.attempt.target.0,
+                    record.attempt.content_version.0.to_be_bytes().as_slice()
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(conflict("immediate recall request changed before issuance"));
+        }
     }
-    tx.execute(
-        "INSERT INTO tactical_study_turn VALUES(?1) ON CONFLICT DO NOTHING",
-        [&next.dataset.0],
-    )
-    .map_err(database_error)?;
+    let ordering_sql = match ordering {
+        StudyOrderingWrite::Preserve => None,
+        StudyOrderingWrite::OweRegularReview => {
+            Some("INSERT INTO tactical_study_turn VALUES(?1) ON CONFLICT DO NOTHING")
+        }
+        StudyOrderingWrite::SatisfyRegularReview => {
+            Some("DELETE FROM tactical_study_turn WHERE dataset_id=?1")
+        }
+    };
+    if let Some(sql) = ordering_sql {
+        tx.execute(sql, [&next.dataset.0]).map_err(database_error)?;
+    }
     tx.commit().map_err(database_error)?;
     Ok(next.revision)
 }
@@ -736,7 +773,15 @@ pub(super) fn observations(
     let limit = limit.clamp(1, 256);
     let mut query=tx.prepare("SELECT o.id,o.source,o.game_id,o.learner,o.report,o.analysis_version,o.observed_at_ms,
         o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0),o.producer
-        FROM tactical_observations o LEFT JOIN tactical_requests r ON r.observation_id=o.id
+        FROM tactical_observations o LEFT JOIN tactical_requests r ON r.id=coalesce(
+            (SELECT id FROM tactical_requests WHERE observation_id=o.id),
+            (SELECT request.id FROM tactical_requests request
+             JOIN tactical_observations basis ON basis.id=request.observation_id
+             WHERE (basis.dataset_id,basis.source,basis.game_id,basis.learner,basis.report,basis.ply)
+                   =(o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)
+               AND basis.motif=?6
+             ORDER BY (request.attempt_id IS NOT NULL OR request.fulfilled=1) DESC,request.id LIMIT 1)
+        )
         WHERE o.dataset_id=?1 AND o.report=?2 AND o.analysis_version=?3 AND o.current=1
           AND o.motif<>?6
           AND (?4 IS NULL OR o.id<?4) ORDER BY o.id DESC LIMIT ?5").map_err(database_error)?;
@@ -1041,19 +1086,98 @@ pub(super) fn lead_in(
 }
 
 impl SqliteStore {
-    pub fn tactical_archive(
+    /// Read both report epochs and verify the requested dataset in one indexed read.
+    pub fn tactical_report_generation(
         &self,
         dataset: &DatasetId,
-        report: &str,
-        version: &str,
-    ) -> Result<Vec<TacticalArchiveGame>, StoreError> {
+    ) -> Result<TacticalReportGeneration, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.generation");
+        self.connection
+            .query_row(
+                "SELECT evidence,archive FROM tactical_report_generation
+                 WHERE singleton=1 AND ?1=(SELECT dataset_id FROM store_state WHERE singleton=1)",
+                [&dataset.0],
+                |row| {
+                    Ok(TacticalReportGeneration {
+                        evidence: row.get(0)?,
+                        archive: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| conflict("tactical analysis dataset changed"))
+    }
+
+    /// Capture inputs under one database snapshot. Keep projection and computation
+    /// outside the callback so a reporting read holds the lock only for capture.
+    pub fn with_tactical_report_snapshot<T, E>(
+        &self,
+        dataset: &DatasetId,
+        read: impl FnOnce(&Self, TacticalReportGeneration) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StoreError>,
+    {
+        let _trace = Operation::new("sqlite.tactical_report.snapshot");
+        let transaction = timed("sqlite.begin", || self.connection.unchecked_transaction())
+            .map_err(database_error)?;
+        let generation = self.tactical_report_generation(dataset)?;
+        let result = read(self, generation)?;
+        timed("sqlite.commit", || transaction.commit()).map_err(database_error)?;
+        Ok(result)
+    }
+
+    /// Read verified players and raw games for rebuilding the archive facts.
+    pub fn tactical_archive_metadata(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Vec<TacticalArchiveMetadata>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.archive");
         active(&self.connection, dataset)?;
         let mut query = self.connection.prepare(
             "WITH latest AS (
                 SELECT max(ordinal) AS ordinal FROM game_comparisons WHERE dataset_id=?1 GROUP BY source,game_id
              )
              SELECT g.source,g.id,lower(json_extract(c.summary,'$.learner')),g.white,g.pgn,
-                    g.start_ms,g.end_ms,coalesce(e.expanded=?2 AND NOT EXISTS (
+                    g.start_ms,g.end_ms
+             FROM latest JOIN game_comparisons c USING(ordinal)
+             JOIN games g ON (g.dataset_id,g.source,g.id)=(c.dataset_id,c.source,c.game_id)
+             WHERE (lower(g.white)=lower(json_extract(c.summary,'$.learner')))!=
+                   (lower(g.black)=lower(json_extract(c.summary,'$.learner')))"
+        ).map_err(database_error)?;
+        query
+            .query_map([&dataset.0], |row| {
+                Ok(TacticalArchiveMetadata {
+                    source: row.get(0)?,
+                    id: row.get(1)?,
+                    learner: row.get(2)?,
+                    white: row.get(3)?,
+                    pgn: row.get(4)?,
+                    start_ms: row.get(5)?,
+                    end_ms: row.get(6)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)
+    }
+
+    /// Read coverage without loading archive PGNs.
+    pub fn tactical_archive_coverage(
+        &self,
+        dataset: &DatasetId,
+        report: &str,
+        version: &str,
+    ) -> Result<Vec<TacticalArchiveCoverage>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.coverage");
+        active(&self.connection, dataset)?;
+        let mut query = self.connection.prepare(
+            "WITH latest AS (
+                SELECT max(ordinal) AS ordinal FROM game_comparisons WHERE dataset_id=?1 GROUP BY source,game_id
+             )
+             SELECT g.source,g.id,lower(json_extract(c.summary,'$.learner')),
+                    coalesce(e.expanded=?2 AND NOT EXISTS (
                         SELECT 1 FROM tactical_positions p
                         WHERE p.enrollment_id=e.id AND p.analysis_version=?2
                           AND p.game_fingerprint=g.mainline_signature AND p.status<>'complete'
@@ -1077,15 +1201,11 @@ impl SqliteStore {
             .query_map(
                 params![dataset.0, version, report, PERSONAL_DECISION_KIND],
                 |row| {
-                    Ok(TacticalArchiveGame {
+                    Ok(TacticalArchiveCoverage {
                         source: row.get(0)?,
                         id: row.get(1)?,
                         learner: row.get(2)?,
-                        white: row.get(3)?,
-                        pgn: row.get(4)?,
-                        start_ms: row.get(5)?,
-                        end_ms: row.get(6)?,
-                        fully_analyzed: row.get(7)?,
+                        fully_analyzed: row.get(3)?,
                     })
                 },
             )
@@ -1100,6 +1220,7 @@ impl SqliteStore {
         report: &str,
         version: &str,
     ) -> Result<Vec<TacticalDecisionRow>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.decisions");
         active(&self.connection, dataset)?;
         let mut query = self.connection.prepare(
             "WITH latest AS (
@@ -1147,6 +1268,7 @@ impl SqliteStore {
         id: u64,
         version: &str,
     ) -> Result<Option<TacticalDecisionDetails>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.detail");
         active(&self.connection, dataset)?;
         self.connection.query_row(
             "SELECT o.details_json,r.id,r.fulfilled,r.cancelled,r.attempt_id IS NOT NULL
@@ -1156,7 +1278,8 @@ impl SqliteStore {
                  WHERE (basis.dataset_id,basis.source,basis.game_id,basis.learner,basis.report,basis.ply)
                        =(o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)
                        AND (request.cancelled=0 OR request.attempt_id IS NOT NULL)
-                 ORDER BY (basis.id=?2) DESC,request.id LIMIT 1)
+                 ORDER BY (request.attempt_id IS NOT NULL OR request.fulfilled=1) DESC,
+                          (basis.id=?2) DESC,request.id LIMIT 1)
              WHERE o.dataset_id=?1 AND o.id=?2 AND o.analysis_version=?3 AND o.current=1
                 AND o.motif=?4
                 AND o.learner=(SELECT lower(json_extract(c.summary,'$.learner')) FROM game_comparisons c
@@ -1184,37 +1307,139 @@ impl SqliteStore {
     }
 }
 
-pub(super) fn issued_for_turn(
+struct StoredTrainingBinding {
+    id: u64,
+    puzzle: TacticalPuzzleRef,
+    issued_or_fulfilled: bool,
+}
+
+fn observation_producer<'a>(
+    analysis: &'a TacticalAnalysis,
+    observation: &'a TacticalObservation,
+) -> &'a str {
+    observation
+        .producer
+        .as_ref()
+        .map_or(analysis.report.as_str(), |producer| producer.id.as_str())
+}
+
+fn binding_for(
+    connection: &Connection,
+    dataset: &DatasetId,
+    analysis: &TacticalAnalysis,
+    observation: &TacticalObservation,
+) -> Result<Option<StoredTrainingBinding>, StoreError> {
+    let producer_id = observation_producer(analysis, observation);
+    let ply = observation.ply;
+    let motif = &observation.motif;
+    let address = match observation.request_scope {
+        TacticalRequestScope::Finding => TacticalRequestAddress::Finding {
+            ply,
+            motif,
+            producer_id,
+        },
+        TacticalRequestScope::Decision => TacticalRequestAddress::Decision {
+            ply,
+            motif,
+            producer_id,
+        },
+    };
+    stored_binding(
+        connection,
+        dataset,
+        &analysis.source,
+        &analysis.game_id,
+        &analysis.learner,
+        &analysis.report,
+        address,
+    )
+}
+
+pub(super) fn training_binding(
     connection: &Connection,
     dataset: &DatasetId,
     game: &TacticalGame,
     report: &str,
-    ply: u32,
+    address: TacticalRequestAddress<'_>,
 ) -> Result<Option<TacticalPuzzleRef>, StoreError> {
     active(connection, dataset)?;
+    Ok(stored_binding(
+        connection,
+        dataset,
+        &game.game.source,
+        &game.game.id,
+        &game.learner,
+        report,
+        address,
+    )?
+    .map(|stored| stored.puzzle))
+}
+
+fn stored_binding(
+    connection: &Connection,
+    dataset: &DatasetId,
+    source: &str,
+    game_id: &str,
+    learner: &str,
+    report: &str,
+    address: TacticalRequestAddress<'_>,
+) -> Result<Option<StoredTrainingBinding>, StoreError> {
+    let (decision, ply, motif, producer) = match address {
+        TacticalRequestAddress::Decision {
+            ply,
+            motif,
+            producer_id,
+        } => (true, ply, motif, producer_id),
+        TacticalRequestAddress::Finding {
+            ply,
+            motif,
+            producer_id,
+        } => (false, ply, motif, producer_id),
+    };
+    // Earlier Decision acceptance could move a Finding request to the
+    // whole-decision observation. Retain that binding if its exact Finding
+    // address no longer has a request. Personal Decision is a stored kind,
+    // independent of detector identity or display text.
     let row = connection
         .query_row(
-            "SELECT r.target_id,r.version FROM tactical_requests r
-         JOIN tactical_observations o ON o.id=r.observation_id
-         WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)=(?1,?2,?3,?4,?5,?6)
-             AND (r.attempt_id IS NOT NULL OR r.fulfilled=1)
-         ORDER BY r.id LIMIT 1",
+            "SELECT r.id,r.target_id,r.version,(r.attempt_id IS NOT NULL OR r.fulfilled=1)
+             FROM tactical_observations o CROSS JOIN tactical_requests r ON o.id=r.observation_id
+             WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)=(?1,?2,?3,?4,?5,?6)
+                 AND (?7 OR (o.motif,o.producer_id)=(?8,?9) OR o.motif=?10)
+             ORDER BY (?7 AND (r.attempt_id IS NOT NULL OR r.fulfilled=1)) DESC,
+                      ((o.motif,o.producer_id)=(?8,?9)) DESC,
+                      (r.attempt_id IS NOT NULL OR r.fulfilled=1) DESC,r.id LIMIT 1",
             params![
                 dataset.0,
-                game.game.source,
-                game.game.id,
-                game.learner,
+                source,
+                game_id,
+                learner,
                 report,
-                ply
+                ply,
+                decision,
+                motif,
+                producer,
+                PERSONAL_DECISION_KIND
             ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get(3)?,
+                ))
+            },
         )
         .optional()
         .map_err(database_error)?;
-    row.map(|(target, version)| {
-        Ok(TacticalPuzzleRef {
-            target: TargetId(target),
-            version: ContentVersion(decode_counter(version)?),
+    row.map(|(id, target, version, issued_or_fulfilled)| {
+        Ok(StoredTrainingBinding {
+            id,
+            puzzle: TacticalPuzzleRef {
+                target: TargetId(target),
+                version: ContentVersion(decode_counter(version)?),
+            },
+            issued_or_fulfilled,
         })
     })
     .transpose()

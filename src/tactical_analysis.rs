@@ -2,7 +2,7 @@
 use crate::GameRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tempo_types::{ContentVersion, Revision, TargetId};
+use tempo_types::{ContentVersion, DatasetId, Revision, TargetId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,9 +35,27 @@ impl TacticalRequestScope {
     }
 }
 
+/// Address the historical request whose accepted content survives re-analysis.
+#[derive(Clone, Copy, Debug)]
+pub enum TacticalRequestAddress<'a> {
+    /// One complete decision may replace earlier detector findings at this ply.
+    Decision {
+        ply: u32,
+        motif: &'a str,
+        producer_id: &'a str,
+    },
+    /// An individual detector finding owns its exact occurrence binding.
+    Finding {
+        ply: u32,
+        motif: &'a str,
+        producer_id: &'a str,
+    },
+}
+
 /// `outcome` and `details_json` are the report's authoritative result, retained
 /// for reporting. Store never interprets them to choose a learning action.
-/// `train` is the application's explicit instruction to request blind recall.
+/// `train` proposes blind recall. For a historical binding, Store retains the
+/// accepted target and version regardless of the revised proposal's content.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TacticalObservation {
     pub producer: Option<tempo_chess::DetectorIdentity>,
@@ -66,6 +84,28 @@ pub struct TacticalAnalysis {
     pub status: TacticalAnalysisStatus,
     pub error: Option<String>,
     pub observations: Vec<TacticalObservation>,
+}
+
+/// Dataset/revision fence for composing tactical acceptance without loading Study.
+pub struct TacticalAcceptanceBasis {
+    pub dataset: DatasetId,
+    pub revision: Revision,
+}
+
+/// Chess and Learning effects for a target receiving a new occurrence request.
+#[derive(Clone, Debug, Default)]
+pub struct TacticalTargetChange {
+    pub content: Option<tempo_chess::ContentItem>,
+    pub introduction: Option<tempo_learning::LearningState>,
+}
+
+/// Store validates that every proposed effect is for a new request before
+/// persisting it. An exact receipt replay applies no effects.
+#[derive(Clone, Debug)]
+pub struct TacticalCommit {
+    pub expected_dataset: DatasetId,
+    pub expected_revision: Revision,
+    pub targets: BTreeMap<TargetId, TacticalTargetChange>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,8 +208,15 @@ pub struct AnalysisGameProgress {
     pub preparing: bool,
 }
 
-/// Source facts for a verified game. Tempo projects time and learner-relative result.
-pub struct TacticalArchiveGame {
+/// Snapshot stamps. Archive input changes also advance the evidence stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TacticalReportGeneration {
+    pub evidence: u64,
+    pub archive: u64,
+}
+
+/// Base game inputs for Chess fact projection, independent of analysis coverage.
+pub struct TacticalArchiveMetadata {
     pub source: String,
     pub id: String,
     pub learner: String,
@@ -177,6 +224,13 @@ pub struct TacticalArchiveGame {
     pub pgn: String,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
+}
+
+/// Analysis coverage for the same selected game/player basis as archive metadata.
+pub struct TacticalArchiveCoverage {
+    pub source: String,
+    pub id: String,
+    pub learner: String,
     pub fully_analyzed: bool,
 }
 

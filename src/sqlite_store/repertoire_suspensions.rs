@@ -12,6 +12,7 @@ use tempo_study::AttemptStatus;
 use tempo_types::Revision;
 
 pub(super) fn read(db: &Connection, dataset: &str) -> Result<BTreeSet<String>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.repertoire_suspensions.read");
     row_values::read_selected(
         db,
         "SELECT repertoire_id FROM repertoire_suspensions WHERE dataset_id=?1",
@@ -94,6 +95,7 @@ pub(super) fn context(
     db: &Connection,
     command: &RepertoireActivityCommand<'_>,
 ) -> Result<RepertoireActivityRead, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.repertoire_suspensions.context");
     let tx =
         Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(database_error)?;
     let state = load_study::load_study(&tx, StudyScope::default())?;
@@ -106,6 +108,7 @@ pub(super) fn apply(
     expected_revision: Revision,
     abandoned: Option<ChessAttempt>,
 ) -> Result<RepertoireActivityResult, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.repertoire_suspensions.apply");
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
@@ -172,6 +175,6 @@ pub(super) fn apply(
         params![receipt.key, receipt.acknowledgment],
     )
     .map_err(database_error)?;
-    tx.commit().map_err(database_error)?;
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(RepertoireActivityResult::Applied)
 }

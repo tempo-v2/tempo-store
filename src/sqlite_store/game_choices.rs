@@ -21,6 +21,7 @@ pub(super) fn attribution(
     row: &Row<'_>,
     column: usize,
 ) -> Result<Option<ChoiceAttribution>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.attribution");
     let target: Option<String> = row.get(column).map_err(database_error)?;
     let version: Option<Vec<u8>> = row.get(column + 1).map_err(database_error)?;
     match (target, version) {
@@ -39,6 +40,7 @@ pub(super) fn read(
     source: &str,
     game: &str,
 ) -> Result<GameChoices, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.read");
     row_values::read_selected(
         db,
         "SELECT position,selected_target_id,selected_answer_version FROM game_choice_boundaries
@@ -53,6 +55,7 @@ pub(super) fn insert_restored(
     dataset: &str,
     choice: &ResolvedGameChoice,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.insert_restored");
     tx.execute(
         "INSERT INTO restored_game_choices
           (dataset_id,source,game_id,position,selected_target_id,selected_answer_version)
@@ -79,12 +82,14 @@ pub(super) fn attribution_matches(
     position: &str,
     version: ContentVersion,
 ) -> bool {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.attribution_matches");
     version.0 > 0
         && version.0 <= item.version.0
         && matches!(&item.definition.kind, ContentKind::Repertoire { position: actual, .. } if actual.0 == position)
 }
 
 pub(super) fn failure_attribution(key: &GameFailureKey) -> ChoiceAttribution {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.failure_attribution");
     ChoiceAttribution {
         target: key.target.clone(),
         answer_version: key.version,
@@ -96,6 +101,7 @@ pub(super) fn validate_new(
     previous: &crate::Snapshot,
     game: &ComparedGame,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.validate_new");
     let Some(choice) = &game.resolved_choice else {
         return Ok(());
     };
@@ -155,6 +161,7 @@ pub(super) fn ensure_current(
     game: &str,
     read_set: &GameChoices,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.ensure_current");
     if read(db, dataset, source, game)? != *read_set {
         return Err(conflict("accepted game choices changed during comparison"));
     }
@@ -228,6 +235,7 @@ fn stored_item(
 }
 
 pub(super) fn migrate(tx: &Transaction<'_>) -> Result<ChoiceMigrationReport, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_choices.migrate");
     let closures: Vec<(String, String, String, String)> = row_values::read_rows(
         tx,
         "SELECT dataset_id,source,game_id,position FROM game_choice_boundaries

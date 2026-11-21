@@ -24,6 +24,7 @@ mod store;
 mod store_error;
 mod tactic_page;
 pub use tactic_page::{TACTIC_PAGE_SIZE, TacticFilter, TacticListRow, TacticPage, TacticPageQuery};
+mod diagnostics;
 mod stored_attempt;
 mod transaction;
 mod write;
@@ -46,7 +47,8 @@ pub use repertoire_activity::{
 pub use snapshot::Snapshot;
 pub use sqlite_store::SqliteStore;
 pub use store::{
-    ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyScope,
+    ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyOrderingWrite,
+    StudyScope,
 };
 pub use store_error::StoreError;
 pub use stored_attempt::{
@@ -76,9 +78,11 @@ pub use study_state::{StudyState, TargetCoverage};
 
 mod tactical_analysis;
 pub use tactical_analysis::{
-    AnalysisGameProgress, StoredTacticalObservation, TacticalAcceptance, TacticalAnalysis,
-    TacticalAnalysisStatus, TacticalArchiveGame, TacticalDecisionDetails, TacticalDecisionRow,
-    TacticalGame, TacticalGameCursor, TacticalObservation, TacticalObservationPage,
-    TacticalPositionRun, TacticalPositionTask, TacticalPuzzleRef, TacticalRequest,
-    TacticalRequestScope, TacticalStatistics, TacticalTrainingLink, TacticalTrainingStatus,
+    AnalysisGameProgress, StoredTacticalObservation, TacticalAcceptance, TacticalAcceptanceBasis,
+    TacticalAnalysis, TacticalAnalysisStatus, TacticalArchiveCoverage, TacticalArchiveMetadata,
+    TacticalCommit, TacticalDecisionDetails, TacticalDecisionRow, TacticalGame, TacticalGameCursor,
+    TacticalObservation, TacticalObservationPage, TacticalPositionRun, TacticalPositionTask,
+    TacticalPuzzleRef, TacticalReportGeneration, TacticalRequest, TacticalRequestAddress,
+    TacticalRequestScope, TacticalStatistics, TacticalTargetChange, TacticalTrainingLink,
+    TacticalTrainingStatus,
 };

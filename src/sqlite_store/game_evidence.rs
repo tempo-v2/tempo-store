@@ -17,6 +17,7 @@ use tempo_types::DatasetId;
 use tempo_types::{ContentVersion, Grade, TargetId};
 
 pub(super) fn game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::GameRecord> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_evidence.game_row");
     Ok(crate::GameRecord {
         source: row.get(0)?,
         id: row.get(1)?,
@@ -38,6 +39,7 @@ pub(super) fn save_failure(
     key: &crate::GameFailureKey,
     assessment: Option<&crate::AssessmentRecord>,
 ) -> Result<(), StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_evidence.save_failure");
     tx.execute(
         "INSERT INTO game_failures VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![
@@ -58,6 +60,7 @@ pub(super) fn correction_game(
     tx: &Transaction<'_>,
     lookup: crate::CorrectionGameLookup<'_>,
 ) -> Result<Option<crate::CorrectionGame>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_evidence.correction_game");
     let dataset = &lookup.dataset.0;
     let target = &lookup.target.0;
     let version = lookup.version.0.to_be_bytes();
@@ -171,6 +174,7 @@ pub(super) fn read_game_failures(
     tx: &Transaction<'_>,
     dataset: &DatasetId,
 ) -> Result<Vec<crate::GameFailureKey>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_evidence.read_game_failures");
     row_values::read_selected(
         tx,
         "SELECT source,game_id,target_id,version,chosen_position FROM game_failures
@@ -194,6 +198,8 @@ pub(super) fn read_portable_evidence(
     tx: &Transaction<'_>,
     dataset: &DatasetId,
 ) -> Result<crate::PortableGameEvidence, StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_evidence.read_portable_evidence");
     let game_failures = read_game_failures(tx, dataset)?;
     let repertoire_reset_boundaries = row_values::read_selected(
         tx,
@@ -237,6 +243,8 @@ pub(super) fn save_portable_evidence(
     evidence: &crate::PortableGameEvidence,
     choice_format: PortableChoiceFormat,
 ) -> Result<(), StoreError> {
+    let _diagnostic =
+        crate::diagnostics::Operation::new("sqlite.game_evidence.save_portable_evidence");
     let repertoires: std::collections::BTreeSet<_> = next
         .catalog
         .items
@@ -422,10 +430,13 @@ impl SqliteStore {
         successful_refresh_ms: Option<u64>,
         receipt: GameReceipt<'_>,
     ) -> Result<AcceptedGames, StoreError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.game_evidence.save_game_evidence");
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
         let scope = StudyScope {
             catalog: !commit.writes.is_empty()
                 || games
@@ -643,7 +654,8 @@ impl SqliteStore {
                 ],
             )
             .map_err(database_error)?;
-        transaction.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
         Ok(accepted)
     }
 
@@ -653,6 +665,8 @@ impl SqliteStore {
         id: &str,
         fingerprint: &str,
     ) -> Result<Option<AcceptedGames>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.game_evidence.read_game_receipt");
         read_receipt(&self.connection, dataset, id, fingerprint)
     }
 
@@ -662,6 +676,8 @@ impl SqliteStore {
         url: &str,
         signature: &str,
     ) -> Result<Option<crate::GameRecord>, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.game_evidence.read_verified_game");
         self.connection
             .query_row(
                 "SELECT source,id,white,black,start_ms,end_ms,fetched_ms,pgn FROM games
@@ -693,9 +709,13 @@ impl SqliteStore {
         through: Option<i64>,
         before: Option<i64>,
     ) -> Result<crate::GameLibraryPage, StoreError> {
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.game_evidence.read_game_library");
         const PAGE: usize = 256;
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         let max_ordinal: i64 = tx
             .query_row(
                 "SELECT coalesce((SELECT max(ordinal) FROM game_comparisons WHERE dataset_id=?1),0)
@@ -752,8 +772,12 @@ impl SqliteStore {
     }
 
     pub(super) fn read_game_history(&self) -> Result<GameHistory, StoreError> {
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-            .map_err(database_error)?;
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.game_evidence.read_game_history");
+        let tx = crate::diagnostics::timed("sqlite.begin", || {
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        })
+        .map_err(database_error)?;
         let dataset = tx
             .query_row(
                 "SELECT dataset_id FROM store_state WHERE singleton=1",
@@ -824,7 +848,7 @@ impl SqliteStore {
             )
             .optional()
             .map_err(database_error)?;
-        tx.commit().map_err(database_error)?;
+        crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         Ok(GameHistory {
             dataset,
             results,
@@ -838,6 +862,7 @@ pub(super) fn read_pgn_timing(
     dataset: &str,
     id: &str,
 ) -> Result<Option<PgnTiming>, StoreError> {
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_evidence.read_pgn_timing");
     connection
         .query_row(
             "SELECT mainline_signature, start_ms, end_ms FROM games

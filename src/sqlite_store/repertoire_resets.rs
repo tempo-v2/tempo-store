@@ -14,9 +14,11 @@ pub(super) fn apply(
     at_ms: u64,
     fresh: &LearningState,
 ) -> Result<RepertoireReset, StoreError> {
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(database_error)?;
+    let _diagnostic = crate::diagnostics::Operation::new("sqlite.repertoire_resets.apply");
+    let tx = crate::diagnostics::timed("sqlite.begin", || {
+        connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    })
+    .map_err(database_error)?;
     let (active_dataset, revision): (String, Vec<u8>) = tx
         .query_row(
             "SELECT dataset_id, revision FROM store_state WHERE singleton=1",
@@ -119,6 +121,6 @@ pub(super) fn apply(
         params![command_id, dataset.0, repertoire, at_ms],
     )
     .map_err(database_error)?;
-    tx.commit().map_err(database_error)?;
+    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(RepertoireReset::Applied(targets))
 }
