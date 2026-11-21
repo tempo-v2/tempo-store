@@ -198,6 +198,33 @@ pub struct TacticalArchiveGame {
     pub fully_analyzed: bool,
 }
 
+
+/// Snapshot stamps. Archive input changes also advance the evidence stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TacticalReportGeneration {
+    pub evidence: u64,
+    pub archive: u64,
+}
+
+/// Base game inputs for Chess fact projection, independent of analysis coverage.
+pub struct TacticalArchiveMetadata {
+    pub source: String,
+    pub id: String,
+    pub learner: String,
+    pub white: String,
+    pub pgn: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+}
+
+/// Analysis coverage for the same selected game/player basis as archive metadata.
+pub struct TacticalArchiveCoverage {
+    pub source: String,
+    pub id: String,
+    pub learner: String,
+    pub fully_analyzed: bool,
+}
+
 /// Small report input. Full engine evidence is loaded only for displayed positions.
 pub struct TacticalDecisionRow {
     pub id: u64,

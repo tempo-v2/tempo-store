@@ -33,7 +33,8 @@ use save_snapshot::save_snapshot;
 
 pub use game_choices::ChoiceMigrationReport;
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
+const TACTICAL_REPORT_GENERATION_SCHEMA: &str = include_str!("sqlite_store/tactical_report_generation.sql");
 const REPERTOIRE_SUSPENSIONS_SCHEMA: &str = include_str!("sqlite_store/repertoire_suspensions.sql");
 const SAVED_REVIEWS_SCHEMA: &str = include_str!("sqlite_store/saved_reviews.sql");
 const TACTICAL_ANALYSIS_SCHEMA: &str = include_str!("sqlite_store/tactical_analysis.sql");
@@ -147,6 +148,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(TACTICAL_ANALYSIS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
             .map_err(database_error)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -312,7 +316,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=13) {
+        if matches!(schema_version(&connection)?, 2..=14) {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -385,6 +389,12 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 13 {
                 tx.execute_batch(TACTICAL_ANALYSIS_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 14)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 14 {
+                tx.execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
