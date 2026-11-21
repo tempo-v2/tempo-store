@@ -50,6 +50,9 @@ pub struct IssuedTacticAttribution {
     pub title: String,
     pub provenance: Vec<String>,
     pub game: Option<TacticGameOrigin>,
+    /// Capture evidence fixed when the tactic was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_capture: Option<tempo_chess::GameCapture>,
 }
 
 /// A Study attempt plus the learning context fixed when it was issued.
