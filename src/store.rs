@@ -570,6 +570,24 @@ pub trait Store {
         Err(StoreError::Unsupported("opponent_gaps"))
     }
 
+    /// The latest derived coverage report for an addressed repertoire.
+    fn coverage_summary(
+        &self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+    ) -> Result<Option<crate::SavedCoverage>, StoreError> {
+        Ok(None)
+    }
+
+    /// Ranked forecast facts for the Games backlog. Stores without forecast data return empty.
+    fn forecast_gaps(
+        &self,
+        _dataset: &DatasetId,
+        _repertoire: Option<&str>,
+    ) -> Result<Vec<crate::ForecastGap>, StoreError> {
+        Ok(Vec::new())
+    }
+
     fn game_backfill_state(
         &self,
         _dataset: &DatasetId,

@@ -88,3 +88,6 @@ pub use tactical_analysis::{
     TacticalRequestScope, TacticalStatistics, TacticalTargetChange, TacticalTrainingLink,
     TacticalTrainingStatus,
 };
+
+mod coverage;
+pub use coverage::{CoverageSummary, ForecastGap, SavedCoverage};
