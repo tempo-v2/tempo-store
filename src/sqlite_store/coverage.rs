@@ -52,7 +52,8 @@ impl SqliteStore {
     ) -> Result<Vec<ForecastGap>, StoreError> {
         let mut statement = self.connection.prepare_cached(
             "SELECT gap.repertoire_id,position,actual_move,probability,
-                    input.input_key IS NOT report.input_key
+                    input.input_key IS NOT report.input_key,
+                    json_extract(summary,'$.request_id'), json_extract(summary,'$.through_move')
              FROM repertoire_coverage_gaps AS gap
              JOIN repertoire_coverage AS report USING(dataset_id,repertoire_id)
              JOIN game_model_inputs AS input USING(dataset_id,repertoire_id)
@@ -71,6 +72,8 @@ impl SqliteStore {
                     },
                     probability: row.get(3)?,
                     stale: row.get(4)?,
+                    report_id: row.get(5)?,
+                    through_move: row.get(6)?,
                 })
             })
             .map_err(database_error)?

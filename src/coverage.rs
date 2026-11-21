@@ -18,6 +18,8 @@ pub struct CoverageSummary {
 pub struct ForecastGap {
     pub gap: OpponentGap,
     pub probability: f64,
+    pub report_id: String,
+    pub through_move: u8,
     pub stale: bool,
 }
 
