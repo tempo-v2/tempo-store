@@ -7,8 +7,8 @@ use crate::{
     StudyScope, StudyState,
 };
 use tempo_chess::Catalog;
-use tempo_learning::SchedulerSettings;
-use tempo_types::{AttemptId, DatasetId, Revision};
+use tempo_learning::{LearningEffect, SchedulerSettings};
+use tempo_types::{AttemptId, ContentVersion, DatasetId, Grade, Revision, TargetId};
 
 /// An atomic in-memory implementation of [`Store`] for wiring and contract tests.
 ///
@@ -49,6 +49,31 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
+    fn latest_applied_test(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+    ) -> Result<Option<Grade>, StoreError> {
+        Ok(self.state.assessments.iter().rev().find_map(|record| {
+            let crate::AssessmentKey::Human(id) = &record.key else {
+                return None;
+            };
+            (&record.dataset == dataset
+                && &record.target == target
+                && record.content_version == version
+                && !matches!(
+                    record.transition.effect,
+                    LearningEffect::PracticeOnly | LearningEffect::StalePositiveIgnored
+                )
+                && self
+                    .state
+                    .attempts
+                    .get(id)
+                    .is_some_and(|attempt| attempt.mode == crate::ActivityMode::Test))
+            .then_some(record.input.grade)
+        }))
+    }
     fn regular_review_owed(&self, dataset: &DatasetId) -> Result<bool, StoreError> {
         if *dataset != self.state.dataset {
             return Err(conflict("daily ordering dataset changed"));

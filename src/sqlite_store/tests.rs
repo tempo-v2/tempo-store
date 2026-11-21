@@ -74,6 +74,29 @@ fn reopening_preserves_full_snapshot_including_ordered_repeated_occurrences() {
 }
 
 #[test]
+fn schema_fifteen_opens_with_the_same_saved_results_and_no_repertoire_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("study.sqlite");
+    let mut store = create(&path, demo_catalog());
+    let issued = issue(&mut store);
+    commit(&mut store, &issued, successful_answer_writes(&issued)).unwrap();
+    let before = store.snapshot().unwrap();
+    store
+        .connection
+        .execute_batch(
+            "DROP INDEX last_applied_human_test;
+         DROP TABLE repertoire_run_steps;
+         PRAGMA user_version=15;",
+        )
+        .unwrap();
+    drop(store);
+
+    let upgraded = SqliteStore::open(&path).unwrap();
+    assert_eq!(schema_version(&upgraded.connection).unwrap(), 16);
+    assert_eq!(upgraded.snapshot().unwrap(), before);
+}
+
+#[test]
 fn simultaneous_writers_from_one_revision_have_one_winner() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");

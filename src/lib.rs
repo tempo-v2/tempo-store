@@ -13,6 +13,7 @@ mod content_history;
 mod memory_store;
 mod receipt;
 mod receipt_result;
+mod repertoire_run;
 mod saved_review;
 pub use saved_review::{
     ReviewCommandKey, ReviewPosition, ReviewWrite, SavedReview, SavedReviewContext,
@@ -44,6 +45,7 @@ pub use receipt_result::ReceiptResult;
 pub use repertoire_activity::{
     RepertoireActivity, RepertoireActivityCommand, RepertoireActivityRead, RepertoireActivityResult,
 };
+pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
 pub use sqlite_store::SqliteStore;
 pub use store::{

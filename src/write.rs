@@ -41,6 +41,10 @@ pub enum Write {
     Catalog(Catalog),
     /// Select the open attempt, or clear the active pointer after closing it.
     Active(Option<AttemptId>),
+    /// Pin the run at issuance or clear its remaining steps.
+    RepertoireRun(Option<crate::RepertoireRun>),
+    /// Preserve the successor after explicitly skipping the active warm-up.
+    SkipRepertoireWarmup(AttemptId),
     /// Replace current data under a never-used dataset ID, retaining old history.
     Restore {
         dataset: DatasetId,

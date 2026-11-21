@@ -61,6 +61,7 @@ pub(super) fn apply(
         .ok_or_else(|| invalid("store revision exhausted"))?;
     let at_ms = i64::try_from(at_ms).map_err(|_| invalid("reset time is out of range"))?;
     let state = row_values::encode(fresh)?;
+    super::repertoire_runs::clear_repertoire(&tx, dataset, repertoire)?;
 
     // Each target remains in current_content even when its lines retire.
     for target in &targets {

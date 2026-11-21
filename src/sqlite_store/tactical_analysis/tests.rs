@@ -144,6 +144,7 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
         acceptance: None,
         revealed_decision: None,
         opponent_lead_in: None,
+        repertoire_warmup: false,
     };
     store
         .commit_daily_issuance(

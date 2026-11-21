@@ -13,7 +13,7 @@ use rusqlite::{
 use std::{collections::BTreeMap, path::Path, time::Duration};
 use tempo_chess::{Catalog, ContentItem, LeadInEvidence};
 use tempo_learning::{LearningState, SchedulerSettings};
-use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, StudyDay, TargetId};
+use tempo_types::{AttemptId, ContentVersion, DatasetId, Grade, Revision, StudyDay, TargetId};
 
 mod game_choices;
 mod game_evidence;
@@ -22,6 +22,7 @@ mod game_relevance;
 mod load_snapshot;
 mod load_study;
 mod repertoire_resets;
+mod repertoire_runs;
 mod repertoire_suspensions;
 mod row_values;
 mod save_snapshot;
@@ -34,7 +35,8 @@ use save_snapshot::save_snapshot;
 
 pub use game_choices::ChoiceMigrationReport;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
+const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.sql");
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
 const TACTICAL_REPORT_GENERATION_SCHEMA: &str =
     include_str!("sqlite_store/tactical_report_generation.sql");
@@ -161,6 +163,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(REPERTOIRE_RUNS_SCHEMA)
             .map_err(database_error)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -335,7 +340,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=14) {
+        if matches!(schema_version(&connection)?, 2..=15) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -419,6 +424,12 @@ impl SqliteStore {
                 tactical_targets::backfill(&tx)?;
                 tx.execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 15)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 15 {
+                tx.execute_batch(REPERTOIRE_RUNS_SCHEMA)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -469,6 +480,14 @@ impl SqliteStore {
 mod tactic_page;
 
 impl Store for SqliteStore {
+    fn latest_applied_test(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+    ) -> Result<Option<Grade>, StoreError> {
+        repertoire_runs::latest_test(&self.connection, dataset, target, version)
+    }
     fn saved_review_page(
         &self,
         dataset: &DatasetId,
