@@ -538,6 +538,14 @@ impl Store for SqliteStore {
         saved_reviews::receipt(&self.connection, key)
     }
 
+    fn tactic_exclusion(
+        &self,
+        key: &crate::ReviewCommandKey<'_>,
+        id: i64,
+    ) -> Result<crate::TacticExclusionRead, StoreError> {
+        saved_reviews::exclusion_basis(&self.connection, key, id)
+    }
+
     fn write_saved_review(
         &mut self,
         key: &crate::ReviewCommandKey<'_>,

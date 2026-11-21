@@ -1,7 +1,7 @@
 //! Attempt-linked references for the desktop review list.
-use crate::{RevealedDecision, StoredAttempt};
+use crate::{ChessAttempt, RevealedDecision, StoredAttempt};
 use serde::Serialize;
-use tempo_types::{AttemptId, ContentVersion, DatasetId, TargetId};
+use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, TargetId};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SavedReview {
@@ -24,8 +24,21 @@ pub struct ReviewPosition<'a> {
 pub enum ReviewWrite<'a> {
     Save(ReviewPosition<'a>),
     Remove(i64),
-    /// Exclude the tactic addressed by a saved mark, retaining the mark.
-    ExcludeTactic(i64),
+    /// Apply the prepared exclusion and, if this tactic is active, end its attempt.
+    ExcludeTactic {
+        id: i64,
+        expected_revision: Revision,
+        abandoned: Option<Box<ChessAttempt>>,
+    },
+}
+
+/// A settled retry or the addressed state Tempo needs to prepare the transition.
+pub enum TacticExclusionRead {
+    Accepted(i64),
+    Pending {
+        revision: Revision,
+        active: Option<Box<ChessAttempt>>,
+    },
 }
 
 /// Disclosure inputs read together for an addressed mark.

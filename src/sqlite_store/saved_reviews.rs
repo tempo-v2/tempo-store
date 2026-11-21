@@ -1,12 +1,13 @@
-use super::row_values::{decode, read_selected, text_value};
+use super::row_values::{decode, decode_counter, read_selected, text_value};
 use super::{database_error, load_study, save_snapshot, stage_commit};
 use crate::{
-    Commit, RevealedDecision, ReviewCommandKey, ReviewWrite, SavedReview, SavedReviewContext,
-    StoreError, StudyScope, Write,
+    ChessAttempt, Commit, RevealedDecision, ReviewCommandKey, ReviewWrite, SavedReview,
+    SavedReviewContext, StoreError, StoredAttempt, StudyScope, TacticExclusionRead, Write,
     store_error::{conflict, invalid},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use tempo_types::DatasetId;
+use tempo_study::AttemptStatus;
+use tempo_types::{DatasetId, Revision};
 
 fn check_dataset(connection: &Connection, dataset: &DatasetId) -> Result<(), StoreError> {
     let current: String = connection
@@ -205,8 +206,18 @@ pub(super) fn write(
             .map_err(database_error)?;
             id
         }
-        ReviewWrite::ExcludeTactic(id) => {
-            exclude_tactic(&tx, key.dataset, id)?;
+        ReviewWrite::ExcludeTactic {
+            id,
+            expected_revision,
+            abandoned,
+        } => {
+            exclude_tactic(
+                &tx,
+                key.dataset,
+                id,
+                expected_revision,
+                abandoned.map(|attempt| *attempt),
+            )?;
             id
         }
     };
@@ -219,18 +230,59 @@ pub(super) fn write(
     Ok(id)
 }
 
-fn exclude_tactic(tx: &Transaction<'_>, dataset: &DatasetId, id: i64) -> Result<(), StoreError> {
-    let target: String = tx
-        .query_row(
-            "SELECT r.target_id FROM saved_reviews r
+fn exclusion_target(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+    id: i64,
+) -> Result<String, StoreError> {
+    tx.query_row(
+        "SELECT r.target_id FROM saved_reviews r
          JOIN current_content c ON (c.dataset_id,c.target_id)=(r.dataset_id,r.target_id)
          WHERE r.dataset_id=?1 AND r.id=?2 AND c.repertoire IS NULL",
-            params![dataset.0, id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(database_error)?
-        .ok_or_else(|| invalid("This saved mark does not address a tactic in the collection."))?;
+        params![dataset.0, id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(database_error)?
+    .ok_or_else(|| invalid("This saved mark does not address a tactic in the collection."))
+}
+
+pub(super) fn exclusion_basis(
+    connection: &Connection,
+    key: &ReviewCommandKey<'_>,
+    id: i64,
+) -> Result<TacticExclusionRead, StoreError> {
+    let tx = connection.unchecked_transaction().map_err(database_error)?;
+    check_dataset(&tx, key.dataset)?;
+    if let Some(id) = receipt(&tx, key)? {
+        return Ok(TacticExclusionRead::Accepted(id));
+    }
+    let target = exclusion_target(&tx, key.dataset, id)?;
+    let (revision, active): (Vec<u8>, Option<String>) = tx.query_row(
+        "SELECT s.revision,a.record FROM store_state s
+         LEFT JOIN attempts a ON a.id=s.active_attempt_id AND a.target_id=?1 AND a.dataset_id=s.dataset_id
+         WHERE s.singleton=1",
+        [target],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(database_error)?;
+    Ok(TacticExclusionRead::Pending {
+        revision: Revision(decode_counter(revision)?),
+        active: active
+            .as_deref()
+            .map(decode::<StoredAttempt>)
+            .transpose()?
+            .map(|record| Box::new(record.attempt)),
+    })
+}
+
+fn exclude_tactic(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+    id: i64,
+    expected_revision: Revision,
+    abandoned: Option<ChessAttempt>,
+) -> Result<(), StoreError> {
+    let target = exclusion_target(tx, dataset, id)?;
     let changed = tx
         .execute(
             "INSERT INTO study_exclusions(dataset_id,target_id,marked_version)
@@ -243,17 +295,37 @@ fn exclude_tactic(tx: &Transaction<'_>, dataset: &DatasetId, id: i64) -> Result<
         return Ok(());
     }
     let state = load_study::load_study(tx, StudyScope::default())?;
-    let mut writes = Vec::new();
-    if let Some(active) = state
+    if state.revision != expected_revision {
+        return Err(conflict("Study changed while removing this tactic."));
+    }
+    let active = state
         .active_attempt
         .as_ref()
         .and_then(|id| state.attempts.get(id))
-        .filter(|record| record.attempt.target.0 == target)
-    {
-        let mut record = active.clone();
-        record.attempt = tempo_study::abandon(&active.attempt, active.attempt.revision)
-            .map_err(|_| invalid("The marked tactic no longer has a valid active attempt."))?;
-        writes.extend([Write::Progress(record), Write::Active(None)]);
+        .filter(|record| record.attempt.target.0 == target);
+    let mut writes = Vec::new();
+    match (active, abandoned) {
+        (None, None) => {}
+        (Some(record), Some(attempt))
+            if attempt.id == record.attempt.id
+                && attempt.status == AttemptStatus::Abandoned
+                && attempt.terminal == record.attempt.terminal
+                && attempt.state == record.attempt.state
+                && attempt.prompt.is_none() =>
+        {
+            writes.extend([
+                Write::Progress(StoredAttempt {
+                    attempt,
+                    ..record.clone()
+                }),
+                Write::Active(None),
+            ]);
+        }
+        _ => {
+            return Err(invalid(
+                "Removing a tactic requires its prepared Study abandonment.",
+            ));
+        }
     }
     let commit = Commit {
         expected_dataset: dataset.clone(),

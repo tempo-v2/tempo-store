@@ -251,6 +251,15 @@ pub trait Store {
     }
 
     /// Change only the saved list, with exact command replay in the same transaction.
+    /// Return a durable retry result or the saved tactic's active attempt and revision.
+    fn tactic_exclusion(
+        &self,
+        _key: &crate::ReviewCommandKey<'_>,
+        _id: i64,
+    ) -> Result<crate::TacticExclusionRead, StoreError> {
+        Err(StoreError::Unsupported("tactic_exclusion"))
+    }
+
     fn write_saved_review(
         &mut self,
         _key: &crate::ReviewCommandKey<'_>,
