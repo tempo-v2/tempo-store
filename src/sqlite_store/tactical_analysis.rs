@@ -1214,59 +1214,6 @@ impl SqliteStore {
             .map_err(database_error)
     }
 
-    pub fn tactical_archive(
-        &self,
-        dataset: &DatasetId,
-        report: &str,
-        version: &str,
-    ) -> Result<Vec<TacticalArchiveGame>, StoreError> {
-        active(&self.connection, dataset)?;
-        let mut query = self.connection.prepare(
-            "WITH latest AS (
-                SELECT max(ordinal) AS ordinal FROM game_comparisons WHERE dataset_id=?1 GROUP BY source,game_id
-             )
-             SELECT g.source,g.id,lower(json_extract(c.summary,'$.learner')),g.white,g.pgn,
-                    g.start_ms,g.end_ms,coalesce(e.expanded=?2 AND NOT EXISTS (
-                        SELECT 1 FROM tactical_positions p
-                        WHERE p.enrollment_id=e.id AND p.analysis_version=?2
-                          AND p.game_fingerprint=g.mainline_signature AND p.status<>'complete'
-                          AND (p.status='pending' OR NOT EXISTS (
-                              SELECT 1 FROM tactical_observations o
-                              WHERE (o.dataset_id,o.source,o.game_id,o.learner,o.ply,o.analysis_version)
-                                   =(e.dataset_id,e.source,e.game_id,e.learner,p.ply,p.analysis_version)
-                                AND o.current=1 AND o.report=?3 AND o.motif=?4
-                                AND json_extract(o.details_json,'$.assessment.analysis.status')='complete'
-                                AND o.outcome<>'uncertain'
-                          ))
-                    ),0)
-             FROM latest JOIN game_comparisons c USING(ordinal)
-             JOIN games g ON (g.dataset_id,g.source,g.id)=(c.dataset_id,c.source,c.game_id)
-             LEFT JOIN tactical_enrollment e ON (e.dataset_id,e.source,e.game_id,e.learner)
-                  =(g.dataset_id,g.source,g.id,lower(json_extract(c.summary,'$.learner')))
-             WHERE (lower(g.white)=lower(json_extract(c.summary,'$.learner')))!=
-                   (lower(g.black)=lower(json_extract(c.summary,'$.learner')))"
-        ).map_err(database_error)?;
-        query
-            .query_map(
-                params![dataset.0, version, report, PERSONAL_DECISION_KIND],
-                |row| {
-                    Ok(TacticalArchiveGame {
-                        source: row.get(0)?,
-                        id: row.get(1)?,
-                        learner: row.get(2)?,
-                        white: row.get(3)?,
-                        pgn: row.get(4)?,
-                        start_ms: row.get(5)?,
-                        end_ms: row.get(6)?,
-                        fully_analyzed: row.get(7)?,
-                    })
-                },
-            )
-            .map_err(database_error)?
-            .collect::<Result<_, _>>()
-            .map_err(database_error)
-    }
-
     pub fn tactical_decisions(
         &self,
         dataset: &DatasetId,

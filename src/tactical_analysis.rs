@@ -208,18 +208,6 @@ pub struct AnalysisGameProgress {
     pub preparing: bool,
 }
 
-/// Source facts for a verified game. Tempo projects time and learner-relative result.
-pub struct TacticalArchiveGame {
-    pub source: String,
-    pub id: String,
-    pub learner: String,
-    pub white: String,
-    pub pgn: String,
-    pub start_ms: Option<i64>,
-    pub end_ms: Option<i64>,
-    pub fully_analyzed: bool,
-}
-
 /// Snapshot stamps. Archive input changes also advance the evidence stamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TacticalReportGeneration {

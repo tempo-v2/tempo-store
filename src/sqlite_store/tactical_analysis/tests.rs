@@ -1059,7 +1059,7 @@ fn archive_coverage_uses_the_requested_report_and_accepted_complete_decision_kin
     store.commit_tactical_analysis(commit(), &result).unwrap();
     assert!(
         !store
-            .tactical_archive(&dataset, &result.report, "v1")
+            .tactical_archive_coverage(&dataset, &result.report, "v1")
             .unwrap()[0]
             .fully_analyzed
     );
@@ -1078,13 +1078,13 @@ fn archive_coverage_uses_the_requested_report_and_accepted_complete_decision_kin
     store.commit_tactical_analysis(commit(), &result).unwrap();
     assert!(
         store
-            .tactical_archive(&dataset, &result.report, "v1")
+            .tactical_archive_coverage(&dataset, &result.report, "v1")
             .unwrap()[0]
             .fully_analyzed
     );
     assert!(
         !store
-            .tactical_archive(&dataset, "another-report", "v1")
+            .tactical_archive_coverage(&dataset, "another-report", "v1")
             .unwrap()[0]
             .fully_analyzed
     );
