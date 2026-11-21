@@ -1631,6 +1631,7 @@ fn tactical_schema_15_backfills_lookup_and_preserves_schema_14_history() {
 
 #[test]
 fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
+    use crate::TacticPayoffPublication::{Deferred, Obsolete, Published};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("payoff.sqlite");
     let fen = "r2qk1nr/ppp3pp/2p1p3/2b5/4P3/8/PPPP1PPP/RNBQK2R w KQkq - 0 1";
@@ -1655,9 +1656,10 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
     let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
     let publish =
         |s: &SqliteStore| s.publish_tactic_payoff(&dataset, request.id as i64, &extension);
-    assert!(!publish(&store).unwrap());
+    assert_eq!(publish(&store).unwrap(), Deferred);
+    assert!(store.tactic_payoff_held(&dataset, &prior).unwrap());
     let issued = issue_request(&mut store, &request, "old-version");
-    assert!(!publish(&store).unwrap());
+    assert_eq!(publish(&store).unwrap(), Deferred);
     let result = tempo_study::submit(
         &ExactSequenceGrader,
         &prior.definition,
@@ -1698,6 +1700,7 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
             },
         )
         .unwrap();
+    assert!(!store.tactic_payoff_held(&dataset, &prior).unwrap());
     let before = store.snapshot().unwrap();
     store.connection.execute_batch("CREATE TRIGGER fail_payoff BEFORE UPDATE ON current_content BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
     assert!(publish(&store).is_err());
@@ -1706,10 +1709,10 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
         .connection
         .execute_batch("DROP TRIGGER fail_payoff")
         .unwrap();
-    assert!(publish(&store).unwrap());
+    assert_eq!(publish(&store).unwrap(), Published);
     drop(store);
     let store = SqliteStore::open(&path).unwrap();
-    assert!(!publish(&store).unwrap());
+    assert_eq!(publish(&store).unwrap(), Obsolete);
     let after = store.snapshot().unwrap();
     assert_eq!(after.catalog.items[&target], *extension.replacement());
     assert_eq!(after.learning, before.learning);

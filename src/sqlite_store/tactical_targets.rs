@@ -227,6 +227,33 @@ pub(super) fn require_target(
     Ok(())
 }
 
+/// Outcome of publishing a verified continuation against its captured basis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TacticPayoffPublication {
+    Published,
+    Deferred,
+    Obsolete,
+    ConflictingDefinition,
+}
+
+fn payoff_held(
+    connection: &Connection,
+    dataset: &DatasetId,
+    item: &ContentItem,
+) -> Result<bool, StoreError> {
+    let pinned: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE dataset_id=?1 AND target_id=?2 AND fulfilled=0 AND cancelled=0)
+             OR EXISTS(SELECT 1 FROM store_state JOIN attempts ON attempts.id=active_attempt_id WHERE attempts.target_id=?2)",
+        params![dataset.0,item.target.0], |row| row.get(0)
+    ).map_err(database_error)?;
+    Ok(pinned
+        || learning(connection, &item.target)?.is_some_and(|state| {
+            state
+                .correction
+                .is_some_and(|correction| correction.answer_version == item.version)
+        }))
+}
+
 impl super::SqliteStore {
     /// Page through accepted game-training bindings. Their versions and
     /// delivery states belong to the request and are never rewritten here.
@@ -254,14 +281,23 @@ impl super::SqliteStore {
         Ok(result)
     }
 
+    /// Skip engine work while Study still needs the previous definition.
+    pub fn tactic_payoff_held(
+        &self,
+        dataset: &DatasetId,
+        item: &ContentItem,
+    ) -> Result<bool, StoreError> {
+        payoff_held(&self.connection, dataset, item)
+    }
+
     /// Publish a Chess-verified extension under an existing game binding.
-    /// Return false for a changed basis or work still pinned to this version.
+    /// Recheck the exact basis and all pinned work inside the transaction.
     pub fn publish_tactic_payoff(
         &self,
         dataset: &DatasetId,
         request: i64,
         extension: &tempo_chess::GeneratedTacticExtension,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<TacticPayoffPublication, StoreError> {
         let basis = extension.prior();
         let next = extension.replacement();
         let tx =
@@ -269,26 +305,25 @@ impl super::SqliteStore {
                 .map_err(database_error)?;
         let (actual, rev) = revision(&tx)?;
         if &actual != dataset || current(&tx, dataset, &basis.target)?.as_ref() != Some(basis) {
-            return Ok(false);
+            return Ok(TacticPayoffPublication::Obsolete);
         }
-        let available:bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE id=?1 AND dataset_id=?2 AND target_id=?3 AND version=?4)
-            AND NOT EXISTS(SELECT 1 FROM tactical_requests WHERE dataset_id=?2 AND target_id=?3 AND fulfilled=0 AND cancelled=0)
-            AND NOT EXISTS(SELECT 1 FROM store_state JOIN attempts ON attempts.id=active_attempt_id WHERE attempts.target_id=?3)",
-            params![request,dataset.0,basis.target.0,basis.version.0.to_be_bytes().as_slice()],|r|r.get(0)).map_err(database_error)?;
-        if !available
-            || learning(&tx, &basis.target)?.is_some_and(|s| {
-                s.correction
-                    .is_some_and(|c| c.answer_version == basis.version)
-            })
-        {
-            return Ok(false);
+        let bound: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE id=?1 AND dataset_id=?2 AND target_id=?3 AND version=?4)",
+            params![request, dataset.0, basis.target.0, basis.version.0.to_be_bytes().as_slice()],
+            |row| row.get(0),
+        ).map_err(database_error)?;
+        if !bound {
+            return Ok(TacticPayoffPublication::Obsolete);
+        }
+        if payoff_held(&tx, dataset, basis)? {
+            return Ok(TacticPayoffPublication::Deferred);
         }
         let lookup = TacticLookup::from_item(next).expect("verified tactic");
         if matches(&tx, dataset, &lookup)?
             .iter()
             .any(|item| item.target != basis.target)
         {
-            return Ok(false);
+            return Ok(TacticPayoffPublication::ConflictingDefinition);
         }
         let payload = encode(next)?;
         let version = next.version.0.to_be_bytes();
@@ -310,6 +345,6 @@ impl super::SqliteStore {
             .ok_or_else(|| invalid("store revision exhausted"))?;
         tx.execute("UPDATE store_state SET revision=?1,content_revision=content_revision+1 WHERE singleton=1",[revision.to_be_bytes()]).map_err(database_error)?;
         tx.commit().map_err(database_error)?;
-        Ok(true)
+        Ok(TacticPayoffPublication::Published)
     }
 }
