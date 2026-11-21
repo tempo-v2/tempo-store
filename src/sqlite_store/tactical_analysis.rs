@@ -753,7 +753,7 @@ pub(super) fn statistics(
         .collect::<Result<_, _>>()
         .map_err(database_error)?;
     stats.observations = stats.outcomes.values().sum();
-    stats.pending_requests=tx.query_row("SELECT count(*) FROM tactical_requests r JOIN tactical_observations o ON o.id=r.observation_id
+    stats.pending_requests=tx.query_row("SELECT count(*) FROM tactical_report_requests r JOIN tactical_observations o ON o.id=r.observation_id
         WHERE r.dataset_id=?1 AND o.report=?2 AND r.fulfilled=0 AND r.cancelled=0",
         params![dataset.0,report],|r|r.get(0)).map_err(database_error)?;
     Ok(stats)
@@ -774,8 +774,8 @@ pub(super) fn observations(
     let mut query=tx.prepare("SELECT o.id,o.source,o.game_id,o.learner,o.report,o.analysis_version,o.observed_at_ms,
         o.ply,o.motif,o.outcome,o.details_json,r.id,r.target_id,r.version,coalesce(r.fulfilled,0),coalesce(r.cancelled,0),o.producer
         FROM tactical_observations o LEFT JOIN tactical_requests r ON r.id=coalesce(
-            (SELECT id FROM tactical_requests WHERE observation_id=o.id),
-            (SELECT request.id FROM tactical_requests request
+            (SELECT id FROM tactical_report_requests WHERE observation_id=o.id),
+            (SELECT request.id FROM tactical_report_requests request
              JOIN tactical_observations basis ON basis.id=request.observation_id
              WHERE (basis.dataset_id,basis.source,basis.game_id,basis.learner,basis.report,basis.ply)
                    =(o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)
@@ -1272,8 +1272,8 @@ impl SqliteStore {
         active(&self.connection, dataset)?;
         self.connection.query_row(
             "SELECT o.details_json,r.id,r.fulfilled,r.cancelled,r.attempt_id IS NOT NULL
-             FROM tactical_observations o LEFT JOIN tactical_requests r ON r.id=(
-                 SELECT request.id FROM tactical_requests request
+             FROM tactical_observations o LEFT JOIN tactical_report_requests r ON r.id=(
+                 SELECT request.id FROM tactical_report_requests request
                  JOIN tactical_observations basis ON basis.id=request.observation_id
                  WHERE (basis.dataset_id,basis.source,basis.game_id,basis.learner,basis.report,basis.ply)
                        =(o.dataset_id,o.source,o.game_id,o.learner,o.report,o.ply)

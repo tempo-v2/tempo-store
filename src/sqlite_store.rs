@@ -1244,17 +1244,40 @@ impl Store for SqliteStore {
         dataset: &DatasetId,
         target: &TargetId,
         version: ContentVersion,
-        issued_at_ms: u64,
+        lookup: crate::TacticGameLookup<'_>,
     ) -> Result<Option<crate::TacticGameOrigin>, StoreError> {
+        use crate::{TacticGameLookup, TacticGameRelation};
+        use rusqlite::types::Value;
+        let (condition, key, relation) = match lookup {
+            TacticGameLookup::Request(id) => (
+                "r.id=?4",
+                Value::Integer(
+                    i64::try_from(id).map_err(|_| invalid("invalid tactical request ID"))?,
+                ),
+                TacticGameRelation::IssuingFinding,
+            ),
+            TacticGameLookup::LegacyAttempt(id) => (
+                "r.attempt_id=?4",
+                Value::Text(id.0.clone()),
+                TacticGameRelation::IssuingFinding,
+            ),
+            TacticGameLookup::Related => (
+                "?4 IS NULL",
+                Value::Null,
+                TacticGameRelation::RelatedFinding,
+            ),
+        };
         self.connection.query_row(
-            "SELECT o.source,g.white,g.black,g.url,o.ply,o.motif
-             FROM tactical_requests r JOIN tactical_observations o ON (o.id,o.dataset_id)=(r.observation_id,r.dataset_id)
-             JOIN games g ON (g.dataset_id,g.source,g.id)=(o.dataset_id,o.source,o.game_id)
-             WHERE r.dataset_id=?1 AND r.target_id=?2 AND r.version=?3 AND r.accepted_at_ms<=?4
-             ORDER BY r.accepted_at_ms,r.id LIMIT 1",
-            params![dataset.0, target.0, version.0.to_be_bytes().as_slice(), issued_at_ms],
+            &format!(
+                "SELECT o.source,g.white,g.black,g.url,o.ply,o.motif
+                 FROM tactical_requests r JOIN tactical_observations o ON (o.id,o.dataset_id)=(r.observation_id,r.dataset_id)
+                 JOIN games g ON (g.dataset_id,g.source,g.id)=(o.dataset_id,o.source,o.game_id)
+                 WHERE r.dataset_id=?1 AND r.target_id=?2 AND r.version=?3 AND {condition}
+                 ORDER BY r.id LIMIT 1"
+            ),
+            params![dataset.0, target.0, version.0.to_be_bytes().as_slice(), key],
             |row| Ok(crate::TacticGameOrigin {
-                source: row.get(0)?, white: row.get(1)?, black: row.get(2)?,
+                relation, source: row.get(0)?, white: row.get(1)?, black: row.get(2)?,
                 url: row.get(3)?, ply: row.get(4)?, motif: row.get(5)?,
             }),
         ).optional().map_err(database_error)

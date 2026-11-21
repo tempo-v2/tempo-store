@@ -13,17 +13,6 @@ pub struct SavedReview {
     pub removed_from_study: bool,
 }
 
-/// A retained game-finding identity associated with the issued tactic version.
-/// The latest scan result can change independently of this binding.
-pub struct TacticGameOrigin {
-    pub source: String,
-    pub white: String,
-    pub black: String,
-    pub url: Option<String>,
-    pub ply: u32,
-    pub motif: String,
-}
-
 pub struct ReviewPosition<'a> {
     pub attempt: &'a AttemptId,
     pub target: &'a TargetId,

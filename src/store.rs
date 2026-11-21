@@ -382,13 +382,13 @@ pub trait Store {
             .map(|entry| entry.item))
     }
 
-    /// Find the first retained game binding available when this version was issued.
+    /// Read the requested game attribution for the exact target and content version.
     fn tactic_game_origin(
         &self,
         _dataset: &DatasetId,
         _target: &TargetId,
         _version: ContentVersion,
-        _issued_at_ms: u64,
+        _lookup: crate::TacticGameLookup<'_>,
     ) -> Result<Option<crate::TacticGameOrigin>, StoreError> {
         Ok(None)
     }
