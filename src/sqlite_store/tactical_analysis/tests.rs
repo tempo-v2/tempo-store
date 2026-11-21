@@ -1045,3 +1045,193 @@ fn archive_coverage_uses_the_requested_report_and_accepted_complete_decision_kin
             .fully_analyzed
     );
 }
+
+#[test]
+fn retained_decision_replays_after_issuance_and_accepts_legacy_supersession_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("study.sqlite");
+    let (mut store, target) = fixture(&path);
+    let dataset: DatasetId = "dataset".into();
+    game(&store, "one");
+    let mut decision = analysis("one", Some(&target));
+    decision.observations[0].request_scope = TacticalRequestScope::Decision;
+    accept(&mut store, &decision, &target);
+    let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
+    decision.analysis_version = "revised-unissued".into();
+    let alternative = TacticalPuzzleRef {
+        target: "alternate".into(),
+        version: ContentVersion(1),
+    };
+    decision.observations[0].train = Some(alternative.clone());
+    decision.observations[0].details_json = r#"{"answer":"d2d4"}"#.into();
+    let accepted = accept(&mut store, &decision, &target);
+    assert_eq!(accepted.new_requests, 0);
+    assert_eq!(
+        store.pending_tactical_requests(&dataset).unwrap(),
+        vec![request.clone()]
+    );
+    let issued = issue_request(&mut store, &request, "original-decision");
+    drop(store);
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert!(accept(&mut store, &decision, &target).replayed);
+    assert!(
+        store
+            .has_pending_tactical_request_for_attempt(&dataset, &issued.attempt.id)
+            .unwrap()
+    );
+
+    // The prior implementation omitted train when a revised issued Decision
+    // proposed different content. Reproduce its persisted receipt shape.
+    decision.analysis_version = "legacy-issued-revision".into();
+    decision.observations[0].train = None;
+    let legacy = accept(&mut store, &decision, &target);
+    store
+        .connection
+        .execute(
+            "UPDATE tactical_analyses SET acceptance=json_remove(acceptance,'$.pinned_bindings')
+         WHERE analysis_version=?1",
+            [&decision.analysis_version],
+        )
+        .unwrap();
+    decision.observations[0].train = Some(alternative);
+    let replayed = accept(&mut store, &decision, &target);
+    assert_eq!(replayed.revision, legacy.revision);
+    assert!(replayed.replayed);
+    assert!(
+        store
+            .pending_tactical_requests(&dataset)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.snapshot().unwrap().active_attempt,
+        Some(issued.attempt.id)
+    );
+}
+
+#[test]
+fn retained_binding_rejects_staged_catalog_changes_for_an_alternate_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, target) = fixture(&dir.path().join("study.sqlite"));
+    game(&store, "one");
+    accept(&mut store, &analysis("one", Some(&target)), &target);
+    let before = store.snapshot().unwrap();
+    let alternate = TacticRecord {
+        namespace: "test".into(),
+        source_id: "alternate".into(),
+        solver_fen: START_FEN.into(),
+        solution: vec!["d2d4".into()],
+        label: "Alternate puzzle".into(),
+        provenance: vec![],
+    };
+    let mut catalog = before.catalog.clone();
+    catalog
+        .items
+        .extend(compile_tactics(&[alternate.clone()]).unwrap().items);
+    let mut revised = analysis("one", Some(&alternate.target_id()));
+    revised.analysis_version = "stale-training-plan".into();
+    let result = store.commit_tactical_analysis(
+        Commit {
+            expected_dataset: before.dataset.clone(),
+            expected_revision: before.revision,
+            writes: vec![
+                Write::Catalog(catalog),
+                Write::Learning {
+                    target: alternate.target_id(),
+                    state: DailyLearning::introduce_capture(
+                        &Default::default(),
+                        StudyTime {
+                            day: StudyDay(10),
+                            unix_ms: 1_000,
+                        },
+                    )
+                    .unwrap(),
+                },
+            ],
+        },
+        &revised,
+    );
+    assert!(matches!(result, Err(StoreError::Conflict(_))), "{result:?}");
+    assert_eq!(store.snapshot().unwrap(), before);
+    assert_eq!(
+        store.pending_tactical_requests(&before.dataset).unwrap()[0].target,
+        target
+    );
+    assert!(
+        store
+            .tactical_observations(
+                &before.dataset,
+                "hanging_material",
+                &revised.analysis_version,
+                None,
+                1
+            )
+            .unwrap()
+            .observations
+            .is_empty()
+    );
+}
+
+#[test]
+fn legacy_finding_preserves_binding_previously_moved_to_a_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, target) = fixture(&dir.path().join("study.sqlite"));
+    let dataset: DatasetId = "dataset".into();
+    game(&store, "one");
+    let mut finding = analysis("one", Some(&target));
+    accept(&mut store, &finding, &target);
+    let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
+
+    let mut decision = finding.clone();
+    decision.analysis_version = "legacy-personal".into();
+    decision.observations[0].motif = PERSONAL_DECISION_KIND.into();
+    decision.observations[0].request_scope = TacticalRequestScope::Decision;
+    accept(&mut store, &decision, &target);
+    let decision_observation: u64 = store
+        .connection
+        .query_row(
+            "SELECT id FROM tactical_observations WHERE motif=?1",
+            [PERSONAL_DECISION_KIND],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE tactical_requests SET observation_id=?1 WHERE id=?2",
+            params![decision_observation, request.id],
+        )
+        .unwrap();
+
+    finding.analysis_version = "revised-finding".into();
+    finding.observations[0].train.as_mut().unwrap().target = "alternate".into();
+    let before = store.snapshot().unwrap();
+    let revised = accept(&mut store, &finding, &target);
+    assert_eq!(revised.new_requests, 0);
+    let page = store
+        .tactical_observations(
+            &dataset,
+            &finding.report,
+            &finding.analysis_version,
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(page.observations[0].request_id, Some(request.id));
+    assert_eq!(
+        page.observations[0]
+            .observation
+            .train
+            .as_ref()
+            .unwrap()
+            .target,
+        target
+    );
+    let pending = store.pending_tactical_requests(&dataset).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, request.id);
+    assert_eq!(pending[0].observation_id, decision_observation);
+    let after = store.snapshot().unwrap();
+    assert_eq!(after.catalog, before.catalog);
+    assert_eq!(after.learning, before.learning);
+}

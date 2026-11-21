@@ -35,11 +35,15 @@ impl TacticalRequestScope {
     }
 }
 
-/// Address the request whose issued content must survive a revised finding.
+/// Address the historical request whose accepted content survives re-analysis.
 #[derive(Clone, Copy, Debug)]
 pub enum TacticalRequestAddress<'a> {
     /// One complete decision may replace earlier detector findings at this ply.
-    Decision { ply: u32 },
+    Decision {
+        ply: u32,
+        motif: &'a str,
+        producer_id: &'a str,
+    },
     /// An individual detector finding owns its exact occurrence binding.
     Finding {
         ply: u32,
@@ -50,7 +54,8 @@ pub enum TacticalRequestAddress<'a> {
 
 /// `outcome` and `details_json` are the report's authoritative result, retained
 /// for reporting. Store never interprets them to choose a learning action.
-/// `train` is the application's explicit instruction to request blind recall.
+/// `train` proposes blind recall. For a historical binding, Store retains the
+/// accepted target and version regardless of the revised proposal's content.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TacticalObservation {
     pub producer: Option<tempo_chess::DetectorIdentity>,

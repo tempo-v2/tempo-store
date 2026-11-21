@@ -103,15 +103,15 @@ pub trait Store {
         Err(StoreError::Unsupported("regular_review_owed"))
     }
 
-    /// The original version remains authoritative once a request is issued.
-    fn issued_tactical_request(
+    /// Read the historical binding, including cancelled and abandoned requests.
+    fn tactical_training_binding(
         &self,
         _dataset: &DatasetId,
         _game: &crate::TacticalGame,
         _report: &str,
         _address: crate::TacticalRequestAddress<'_>,
     ) -> Result<Option<crate::TacticalPuzzleRef>, StoreError> {
-        Err(StoreError::Unsupported("issued_tactical_request"))
+        Err(StoreError::Unsupported("tactical_training_binding"))
     }
 
     fn tactical_lead_in(
