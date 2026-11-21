@@ -765,7 +765,9 @@ fn remove_v15_projection(store: &SqliteStore) {
     store
         .connection
         .execute_batch(
-            "DROP INDEX tactical_report_current_game;
+            "DROP TABLE repertoire_coverage_gaps;
+         DROP TABLE repertoire_coverage;
+         DROP INDEX tactical_report_current_game;
          DROP INDEX tactical_report_decisions;
          DROP INDEX tactical_report_comparisons;
          DROP TABLE tactical_report_generation;
