@@ -86,3 +86,5 @@ pub use tactical_analysis::{
     TacticalRequestScope, TacticalStatistics, TacticalTargetChange, TacticalTrainingLink,
     TacticalTrainingStatus,
 };
+
+pub use sqlite_store::{CoverageSummary, ForecastGap};

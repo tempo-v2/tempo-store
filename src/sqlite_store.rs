@@ -34,7 +34,11 @@ use save_snapshot::save_snapshot;
 
 pub use game_choices::ChoiceMigrationReport;
 
-const SCHEMA_VERSION: i64 = 15;
+mod coverage;
+pub use coverage::{CoverageSummary, ForecastGap};
+
+const SCHEMA_VERSION: i64 = 16;
+const COVERAGE_SCHEMA: &str = include_str!("sqlite_store/coverage.sql");
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
 const TACTICAL_REPORT_GENERATION_SCHEMA: &str =
     include_str!("sqlite_store/tactical_report_generation.sql");
@@ -161,6 +165,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(COVERAGE_SCHEMA)
             .map_err(database_error)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -335,7 +342,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=14) {
+        if matches!(schema_version(&connection)?, 2..=15) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -419,6 +426,11 @@ impl SqliteStore {
                 tactical_targets::backfill(&tx)?;
                 tx.execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 15)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 15 {
+                tx.execute_batch(COVERAGE_SCHEMA).map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -462,7 +474,7 @@ impl SqliteStore {
     ) -> Result<Vec<crate::ProjectionBook>, StoreError> {
         let _diagnostic =
             crate::diagnostics::Operation::new("sqlite.sqlite_store.projection_books");
-        game_model::books(&self.connection, dataset, scope)
+        game_model::books(&self.connection, dataset, scope, None)
     }
 }
 

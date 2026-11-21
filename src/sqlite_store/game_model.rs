@@ -128,6 +128,7 @@ pub(super) fn books(
     db: &Connection,
     dataset: &DatasetId,
     scope: ProjectionScope,
+    repertoire: Option<&str>,
 ) -> Result<Vec<ProjectionBook>, StoreError> {
     let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.books");
     let tx =
@@ -146,11 +147,12 @@ pub(super) fn books(
            AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
                WHERE (suspended.dataset_id,suspended.repertoire_id)=(input.dataset_id,input.repertoire_id))
            AND (?3 OR result.input_key IS NULL OR result.complete=0)
+           AND (?4 IS NULL OR input.repertoire_id=?4)
          ORDER BY input.repertoire_id",
         params![
             dataset.0,
             REACH_MODEL_KEY,
-            scope == ProjectionScope::AllVerified
+            scope == ProjectionScope::AllVerified, repertoire
         ],
         |row| {
             Ok((
@@ -205,6 +207,23 @@ pub(super) fn status(db: &Connection, dataset: &DatasetId) -> Result<ProjectionS
     ).map_err(database_error)
 }
 
+pub(super) fn current_input(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+    repertoire: &str,
+    input_key: &str,
+) -> Result<bool, StoreError> {
+    tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM game_model_inputs WHERE dataset_id=?1 AND repertoire_id=?2
+           AND state='verified' AND input_key=?3
+           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions WHERE dataset_id=?1 AND repertoire_id=?2))",
+            params![dataset.0, repertoire, input_key],
+            |row| row.get(0),
+        )
+        .map_err(database_error)
+}
+
 pub(super) fn replace(
     db: &mut Connection,
     dataset: &DatasetId,
@@ -218,16 +237,7 @@ pub(super) fn replace(
     if projection.model != REACH_MODEL_KEY {
         return Err(invalid("unsupported projection algorithm"));
     }
-    let current: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM game_model_inputs WHERE dataset_id=?1 AND repertoire_id=?2
-           AND state='verified' AND input_key=?3
-           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions WHERE dataset_id=?1 AND repertoire_id=?2))",
-            params![dataset.0, projection.repertoire_id, projection.input_key],
-            |row| row.get(0),
-        )
-        .map_err(database_error)?;
-    if !current {
+    if !current_input(&tx, dataset, projection.repertoire_id, projection.input_key)? {
         return Err(conflict("the repertoire's model input changed"));
     }
     let targets = staged_targets(&tx, dataset, projection.repertoire_id)?;
