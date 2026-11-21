@@ -1,10 +1,11 @@
-use super::database_error;
 use super::row_values::{decode, read_selected, text_value};
+use super::{database_error, load_study, save_snapshot, stage_commit};
 use crate::{
-    RevealedDecision, ReviewCommandKey, ReviewWrite, SavedReview, SavedReviewContext, StoreError,
+    Commit, RevealedDecision, ReviewCommandKey, ReviewWrite, SavedReview, SavedReviewContext,
+    StoreError, StudyScope, Write,
     store_error::{conflict, invalid},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tempo_types::DatasetId;
 
 fn check_dataset(connection: &Connection, dataset: &DatasetId) -> Result<(), StoreError> {
@@ -33,8 +34,12 @@ pub(super) fn page(
     check_dataset(&tx, dataset)?;
     read_selected(
         &tx,
-        "SELECT r.id, json_extract(a.record, '$.repertoire_name'), r.decision_index, r.saved_at_ms
+        "SELECT r.id, json_extract(a.record, '$.repertoire_name'), r.decision_index, r.saved_at_ms,
+             c.target_id IS NOT NULL AND c.repertoire IS NULL AND x.target_id IS NULL,
+             x.target_id IS NOT NULL
          FROM saved_reviews r JOIN attempts a ON a.id=r.attempt_id
+         LEFT JOIN current_content c ON (c.dataset_id,c.target_id)=(r.dataset_id,r.target_id)
+         LEFT JOIN study_exclusions x ON (x.dataset_id,x.target_id)=(r.dataset_id,r.target_id)
          WHERE r.dataset_id=?1 AND r.id < ?2 ORDER BY r.id DESC LIMIT 31",
         params![dataset.0, before.unwrap_or(i64::MAX)],
         |row| {
@@ -43,6 +48,8 @@ pub(super) fn page(
                 exercise_name: row.get(1).map_err(database_error)?,
                 decision_index: row.get(2).map_err(database_error)?,
                 saved_at_ms: row.get(3).map_err(database_error)?,
+                can_remove_from_study: row.get(4).map_err(database_error)?,
+                removed_from_study: row.get(5).map_err(database_error)?,
             })
         },
     )
@@ -82,7 +89,9 @@ pub(super) fn context(
                                  WHERE attempt_id=mark.attempt_id
                                    AND json_extract(result, '$.Study.attempt.state.decision_index')=mark.decision_index
                                    AND json_extract(result, '$.Study.feedback.correct')=0)
-                     ELSE 0 END
+                     ELSE 0 END,
+                EXISTS(SELECT 1 FROM study_exclusions x
+                       WHERE (x.dataset_id,x.target_id)=(mark.dataset_id,mark.target_id))
          FROM mark JOIN store_state s ON s.singleton=1
          LEFT JOIN attempts active ON active.id=s.active_attempt_id AND active.target_id=mark.target_id",
         params![dataset.0, id],
@@ -100,6 +109,7 @@ pub(super) fn context(
                 later_abandoned_reveal: row.get::<_, Option<usize>>(4).map_err(database_error)?
                     .map(|decision_index| RevealedDecision { decision_index }),
                 legacy_source_feedback: row.get(5).map_err(database_error)?,
+                excluded_from_study: row.get(6).map_err(database_error)?,
             })
         },
     )?;
@@ -195,6 +205,10 @@ pub(super) fn write(
             .map_err(database_error)?;
             id
         }
+        ReviewWrite::ExcludeTactic(id) => {
+            exclude_tactic(&tx, key.dataset, id)?;
+            id
+        }
     };
     tx.execute(
         "INSERT INTO saved_review_receipts VALUES (?1, ?2, ?3, ?4)",
@@ -203,4 +217,50 @@ pub(super) fn write(
     .map_err(database_error)?;
     crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(id)
+}
+
+fn exclude_tactic(tx: &Transaction<'_>, dataset: &DatasetId, id: i64) -> Result<(), StoreError> {
+    let target: String = tx
+        .query_row(
+            "SELECT r.target_id FROM saved_reviews r
+         JOIN current_content c ON (c.dataset_id,c.target_id)=(r.dataset_id,r.target_id)
+         WHERE r.dataset_id=?1 AND r.id=?2 AND c.repertoire IS NULL",
+            params![dataset.0, id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?
+        .ok_or_else(|| invalid("This saved mark does not address a tactic in the collection."))?;
+    let changed = tx
+        .execute(
+            "INSERT INTO study_exclusions(dataset_id,target_id,marked_version)
+         SELECT dataset_id,target_id,version FROM saved_reviews WHERE id=?1 AND dataset_id=?2
+         ON CONFLICT(dataset_id,target_id) DO NOTHING",
+            params![id, dataset.0],
+        )
+        .map_err(database_error)?;
+    if changed == 0 {
+        return Ok(());
+    }
+    let state = load_study::load_study(tx, StudyScope::default())?;
+    let mut writes = Vec::new();
+    if let Some(active) = state
+        .active_attempt
+        .as_ref()
+        .and_then(|id| state.attempts.get(id))
+        .filter(|record| record.attempt.target.0 == target)
+    {
+        let mut record = active.clone();
+        record.attempt = tempo_study::abandon(&active.attempt, active.attempt.revision)
+            .map_err(|_| invalid("The marked tactic no longer has a valid active attempt."))?;
+        writes.extend([Write::Progress(record), Write::Active(None)]);
+    }
+    let commit = Commit {
+        expected_dataset: dataset.clone(),
+        expected_revision: state.revision,
+        writes,
+    };
+    let previous = load_study::staging_image(state);
+    let next = stage_commit(&previous, commit)?;
+    save_snapshot(tx, Some(&previous), &next)
 }

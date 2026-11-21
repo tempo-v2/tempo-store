@@ -44,4 +44,5 @@ pub struct TacticListRow {
     pub label: String,
     pub introduced: bool,
     pub due: bool,
+    pub removed_from_study: bool,
 }

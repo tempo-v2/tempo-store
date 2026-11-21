@@ -17,6 +17,7 @@ mod repertoire_run;
 mod saved_review;
 pub use saved_review::{
     ReviewCommandKey, ReviewPosition, ReviewWrite, SavedReview, SavedReviewContext,
+    TacticGameOrigin,
 };
 mod repertoire_activity;
 mod snapshot;

@@ -382,6 +382,17 @@ pub trait Store {
             .map(|entry| entry.item))
     }
 
+    /// Find the first retained game binding available when this version was issued.
+    fn tactic_game_origin(
+        &self,
+        _dataset: &DatasetId,
+        _target: &TargetId,
+        _version: ContentVersion,
+        _issued_at_ms: u64,
+    ) -> Result<Option<crate::TacticGameOrigin>, StoreError> {
+        Ok(None)
+    }
+
     /// Counts accepted reset commands independent of clock precision or ordering.
     fn repertoire_reset_generation(
         &self,
