@@ -8,6 +8,7 @@ use super::{
     tactical_targets,
 };
 use crate::{
+    diagnostics::{Operation, timed},
     store_error::{conflict, invalid},
     transaction::stage_commit,
     *,
@@ -96,6 +97,7 @@ pub(super) fn accept(
     commit: TacticalCommit,
     analysis: &TacticalAnalysis,
 ) -> Result<TacticalAcceptance, StoreError> {
+    let _trace = Operation::new("sqlite.tactical_analysis.accept");
     if [
         &analysis.source,
         &analysis.game_id,
@@ -118,9 +120,10 @@ pub(super) fn accept(
             "failed analysis cannot apply observations or training",
         ));
     }
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(database_error)?;
+    let tx = timed("sqlite.begin", || {
+        connection.transaction_with_behavior(TransactionBehavior::Immediate)
+    })
+    .map_err(database_error)?;
     let dataset = &commit.expected_dataset;
     let (current_dataset, current_revision) = tactical_targets::revision(&tx)?;
     if &current_dataset != dataset {
@@ -253,6 +256,7 @@ pub(super) fn accept(
             return Err(conflict("position is no longer pending"));
         }
     }
+    let bindings_trace = Operation::new("sqlite.tactical_analysis.read_bindings");
     let mut bindings = Vec::with_capacity(analysis.observations.len());
     let mut new_targets = BTreeSet::new();
     for observation in &analysis.observations {
@@ -267,6 +271,8 @@ pub(super) fn accept(
         };
         bindings.push(binding);
     }
+    drop(bindings_trace);
+    let writes_trace = Operation::new("sqlite.tactical_analysis.write_effects");
     let mut changed_content = false;
     for (target, change) in &commit.targets {
         if !new_targets.contains(target) {
@@ -441,7 +447,8 @@ pub(super) fn accept(
             analysis.analysis_version,analysis.game_fingerprint,status_name(analysis.status),
             analysis.analyzed_at_ms,analysis.decisions_scanned,digest,analysis.error,encode(&receipt)?,position_id,deeper]
     ).map_err(database_error)?;
-    tx.commit().map_err(database_error)?;
+    drop(writes_trace);
+    timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
     Ok(receipt.acceptance)
 }
 
@@ -1084,6 +1091,7 @@ impl SqliteStore {
         &self,
         dataset: &DatasetId,
     ) -> Result<TacticalReportGeneration, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.generation");
         self.connection
             .query_row(
                 "SELECT evidence,archive FROM tactical_report_generation
@@ -1111,13 +1119,12 @@ impl SqliteStore {
     where
         E: From<StoreError>,
     {
-        let transaction = self
-            .connection
-            .unchecked_transaction()
+        let _trace = Operation::new("sqlite.tactical_report.snapshot");
+        let transaction = timed("sqlite.begin", || self.connection.unchecked_transaction())
             .map_err(database_error)?;
         let generation = self.tactical_report_generation(dataset)?;
         let result = read(self, generation)?;
-        transaction.commit().map_err(database_error)?;
+        timed("sqlite.commit", || transaction.commit()).map_err(database_error)?;
         Ok(result)
     }
 
@@ -1126,6 +1133,7 @@ impl SqliteStore {
         &self,
         dataset: &DatasetId,
     ) -> Result<Vec<TacticalArchiveMetadata>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.archive");
         active(&self.connection, dataset)?;
         let mut query = self.connection.prepare(
             "WITH latest AS (
@@ -1162,6 +1170,7 @@ impl SqliteStore {
         report: &str,
         version: &str,
     ) -> Result<Vec<TacticalArchiveCoverage>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.coverage");
         active(&self.connection, dataset)?;
         let mut query = self.connection.prepare(
             "WITH latest AS (
@@ -1264,6 +1273,7 @@ impl SqliteStore {
         report: &str,
         version: &str,
     ) -> Result<Vec<TacticalDecisionRow>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.decisions");
         active(&self.connection, dataset)?;
         let mut query = self.connection.prepare(
             "WITH latest AS (
@@ -1311,6 +1321,7 @@ impl SqliteStore {
         id: u64,
         version: &str,
     ) -> Result<Option<TacticalDecisionDetails>, StoreError> {
+        let _trace = Operation::new("sqlite.tactical_report.detail");
         active(&self.connection, dataset)?;
         self.connection.query_row(
             "SELECT o.details_json,r.id,r.fulfilled,r.cancelled,r.attempt_id IS NOT NULL

@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     StoreError, TacticalTargetChange,
+    diagnostics::Operation,
     store_error::{conflict, invalid},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -27,6 +28,7 @@ pub(super) fn matches(
     dataset: &DatasetId,
     lookup: &TacticLookup,
 ) -> Result<Vec<ContentItem>, StoreError> {
+    let _trace = Operation::new("sqlite.tactical_targets.matches");
     read_selected(
         tx,
         MATCHES,
@@ -44,6 +46,7 @@ pub(super) fn learning(
     connection: &Connection,
     target: &TargetId,
 ) -> Result<Option<LearningState>, StoreError> {
+    let _trace = Operation::new("sqlite.tactical_targets.learning");
     let encoded: Option<String> = connection
         .query_row(
             "SELECT state FROM learning WHERE target_id=?1",
@@ -140,6 +143,7 @@ pub(super) fn apply_change(
                 return Err(conflict("tactical acceptance cannot replace a definition"));
             }
             if item != previous {
+                let _trace = Operation::new("sqlite.tactical_targets.update_content");
                 tx.execute(
                     "UPDATE current_content SET item=?1 WHERE target_id=?2 AND dataset_id=?3",
                     params![encode(item)?, target.0, dataset.0],
@@ -153,6 +157,7 @@ pub(super) fn apply_change(
                 index_item(tx, item)?;
             }
         } else {
+            let _trace = Operation::new("sqlite.tactical_targets.insert_content");
             if item.version != ContentVersion(1) {
                 return Err(invalid("new tactical content requires an initial version"));
             }
@@ -182,6 +187,7 @@ pub(super) fn apply_change(
         }
     }
     if let Some(introduction) = &change.introduction {
+        let _trace = Operation::new("sqlite.tactical_targets.introduce_learning");
         if !introduction.introduced || learning(tx, target)?.is_some_and(|prior| prior.introduced) {
             return Err(invalid(
                 "tactical acceptance may only introduce an unintroduced target",
