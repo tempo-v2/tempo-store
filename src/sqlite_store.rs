@@ -27,6 +27,7 @@ mod row_values;
 mod save_snapshot;
 mod saved_reviews;
 mod tactical_analysis;
+mod tactical_targets;
 
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;
@@ -34,7 +35,9 @@ use save_snapshot::save_snapshot;
 pub use game_choices::ChoiceMigrationReport;
 
 const SCHEMA_VERSION: i64 = 15;
-const TACTICAL_REPORT_GENERATION_SCHEMA: &str = include_str!("sqlite_store/tactical_report_generation.sql");
+const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
+const TACTICAL_REPORT_GENERATION_SCHEMA: &str =
+    include_str!("sqlite_store/tactical_report_generation.sql");
 const REPERTOIRE_SUSPENSIONS_SCHEMA: &str = include_str!("sqlite_store/repertoire_suspensions.sql");
 const SAVED_REVIEWS_SCHEMA: &str = include_str!("sqlite_store/saved_reviews.sql");
 const TACTICAL_ANALYSIS_SCHEMA: &str = include_str!("sqlite_store/tactical_analysis.sql");
@@ -152,6 +155,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(TACTICAL_ANALYSIS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(TACTICAL_IDENTITY_SCHEMA)
             .map_err(database_error)?;
         transaction
             .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
@@ -408,6 +414,9 @@ impl SqliteStore {
                     .map_err(database_error)?;
             }
             if schema_version(&tx)? == 14 {
+                tx.execute_batch(TACTICAL_IDENTITY_SCHEMA)
+                    .map_err(database_error)?;
+                tactical_targets::backfill(&tx)?;
                 tx.execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -519,9 +528,37 @@ impl Store for SqliteStore {
         repertoire_suspensions::apply(&mut self.connection, command, expected_revision, abandoned)
     }
 
+    fn tactical_acceptance_basis(&self) -> Result<crate::TacticalAcceptanceBasis, StoreError> {
+        let (dataset, revision) = tactical_targets::revision(&self.connection)?;
+        Ok(crate::TacticalAcceptanceBasis { dataset, revision })
+    }
+
+    fn tactical_content_matches(
+        &self,
+        dataset: &DatasetId,
+        lookup: &tempo_chess::TacticLookup,
+    ) -> Result<Vec<ContentItem>, StoreError> {
+        tactical_targets::matches(&self.connection, dataset, lookup)
+    }
+
+    fn tactical_target_learning(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+    ) -> Result<Option<LearningState>, StoreError> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(database_error)?;
+        if &tactical_targets::revision(&tx)?.0 != dataset {
+            return Err(conflict("tactical analysis dataset changed"));
+        }
+        tactical_targets::learning(&tx, target)
+    }
+
     fn commit_tactical_analysis(
         &mut self,
-        commit: Commit,
+        commit: crate::TacticalCommit,
         analysis: &crate::TacticalAnalysis,
     ) -> Result<crate::TacticalAcceptance, StoreError> {
         tactical_analysis::accept(&mut self.connection, commit, analysis)
@@ -584,7 +621,13 @@ impl Store for SqliteStore {
         immediate_request: Option<u64>,
         ordering: crate::StudyOrderingWrite,
     ) -> Result<Revision, StoreError> {
-        tactical_analysis::issue_daily(&mut self.connection, commit, scope, immediate_request, ordering)
+        tactical_analysis::issue_daily(
+            &mut self.connection,
+            commit,
+            scope,
+            immediate_request,
+            ordering,
+        )
     }
     fn tactical_statistics(
         &self,

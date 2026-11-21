@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use tempo_chess::{ExactSequenceGrader, START_FEN, TacticRecord, compile_tactics};
 use tempo_learning::{DailyLearning, LearningPolicy};
 use tempo_study::{Exercise, start_selected_exercise};
@@ -80,27 +81,31 @@ fn accept(
     target: &TargetId,
 ) -> TacticalAcceptance {
     let snapshot = store.snapshot().unwrap();
-    let writes = if !snapshot.learning[target].introduced && !analysis.observations.is_empty() {
-        vec![Write::Learning {
-            target: target.clone(),
-            state: DailyLearning::introduce_capture(
-                &snapshot.learning[target],
-                StudyTime {
-                    day: StudyDay(10),
-                    unix_ms: 1_000,
-                },
-            )
-            .unwrap(),
-        }]
-    } else {
-        vec![]
-    };
+    let mut targets = BTreeMap::new();
+    if !snapshot.learning[target].introduced && !analysis.observations.is_empty() {
+        targets.insert(
+            target.clone(),
+            TacticalTargetChange {
+                content: None,
+                introduction: Some(
+                    DailyLearning::introduce_capture(
+                        &snapshot.learning[target],
+                        StudyTime {
+                            day: StudyDay(10),
+                            unix_ms: 1_000,
+                        },
+                    )
+                    .unwrap(),
+                ),
+            },
+        );
+    }
     store
         .commit_tactical_analysis(
-            Commit {
+            TacticalCommit {
                 expected_dataset: snapshot.dataset,
                 expected_revision: snapshot.revision,
-                writes,
+                targets,
             },
             analysis,
         )
@@ -174,10 +179,10 @@ fn atomic_acceptance_replay_and_changed_detector_version_do_not_duplicate_real_o
     assert_eq!(accepted.new_request_targets, vec![target.clone()]);
     let replay = store
         .commit_tactical_analysis(
-            Commit {
+            TacticalCommit {
                 expected_dataset: original.dataset.clone(),
                 expected_revision: original.revision,
-                writes: vec![],
+                targets: BTreeMap::new(),
             },
             &request,
         )
@@ -216,10 +221,10 @@ fn atomic_acceptance_replay_and_changed_detector_version_do_not_duplicate_real_o
     assert!(
         store
             .commit_tactical_analysis(
-                Commit {
+                TacticalCommit {
                     expected_dataset: before.dataset.clone(),
                     expected_revision: before.revision,
-                    writes: vec![]
+                    targets: BTreeMap::new(),
                 },
                 &inconsistent
             )
@@ -260,10 +265,10 @@ fn a_bound_finding_replays_after_its_unadopted_proposal_resolves_to_a_different_
     revised.observations[0].details_json = r#"{"answer":"c2c4"}"#.into();
     assert!(matches!(
         store.commit_tactical_analysis(
-            Commit {
+            TacticalCommit {
                 expected_dataset: dataset,
                 expected_revision: after.revision,
-                writes: vec![],
+                targets: BTreeMap::new(),
             },
             &revised,
         ),
@@ -431,25 +436,31 @@ fn late_acceptance_failure_rolls_back_content_learning_observation_and_request()
         },
     )
     .unwrap();
-    let mut catalog = before.catalog.clone();
-    catalog.items.get_mut(&target).unwrap().label = "accepted label".into();
-    let commit = Commit {
+    let mut item = before.catalog.items[&target].clone();
+    item.label = "accepted label".into();
+    let commit = TacticalCommit {
         expected_dataset: before.dataset.clone(),
         expected_revision: before.revision,
-        writes: vec![
-            Write::Catalog(catalog),
-            Write::Learning {
-                target: target.clone(),
-                state,
+        targets: [(
+            target.clone(),
+            TacticalTargetChange {
+                content: Some(item),
+                introduction: Some(state),
             },
-        ],
+        )]
+        .into(),
     };
+    let generation = store.tactical_report_generation(&before.dataset).unwrap();
     assert!(
         store
             .commit_tactical_analysis(commit.clone(), &analysis("one", Some(&target)))
             .is_err()
     );
     assert_eq!(before, store.snapshot().unwrap());
+    assert_eq!(
+        generation,
+        store.tactical_report_generation(&before.dataset).unwrap()
+    );
     assert!(
         store
             .pending_tactical_requests(&before.dataset)
@@ -733,6 +744,38 @@ fn pending_keyset_sweep_covers_more_than_501_undated_games_and_records_empty_and
     );
 }
 
+fn remove_v15_projection(store: &SqliteStore) {
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'tactical_report_%'",
+        )
+        .unwrap();
+    let triggers = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for trigger in triggers {
+        store
+            .connection
+            .execute_batch(&format!("DROP TRIGGER {trigger}"))
+            .unwrap();
+    }
+    store
+        .connection
+        .execute_batch(
+            "DROP INDEX tactical_report_current_game;
+         DROP INDEX tactical_report_decisions;
+         DROP INDEX tactical_report_comparisons;
+         DROP TABLE tactical_report_generation;
+         DROP TABLE tactical_sources;
+         DROP TABLE tactical_identities;
+         PRAGMA user_version=14;",
+        )
+        .unwrap();
+}
+
 #[test]
 fn schema_11_migration_is_additive_and_an_interrupted_attempt_rolls_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -781,6 +824,7 @@ fn schema_11_migration_is_additive_and_an_interrupted_attempt_rolls_back() {
     assert_eq!(before.receipts.len(), 1);
     assert_eq!(before.assessments.len(), 1);
     assert!(before.active_attempt.is_some());
+    remove_v15_projection(&store);
     store.connection.execute_batch("DROP TABLE tactical_requests; DROP TABLE tactical_observations; DROP TABLE tactical_analyses; DROP TABLE tactical_positions; DROP TABLE tactical_enrollment; DROP TABLE tactical_pause; DROP TABLE tactical_study_turn; PRAGMA user_version=13;").unwrap();
     store
         .connection
@@ -880,10 +924,10 @@ fn retry_and_attribution_follow_explicit_position_contract() {
         train: None,
     });
     let revision = store.snapshot().unwrap().revision;
-    let commit = || Commit {
+    let commit = || TacticalCommit {
         expected_dataset: dataset.clone(),
         expected_revision: revision,
-        writes: vec![],
+        targets: BTreeMap::new(),
     };
     assert!(store.commit_tactical_analysis(commit(), &result).is_err());
     result.observations[0].producer = Some(member);
@@ -983,10 +1027,10 @@ fn archive_coverage_uses_the_requested_report_and_accepted_complete_decision_kin
     result.position = Some(position.run);
     result.status = TacticalAnalysisStatus::Inconclusive;
     let snapshot = store.snapshot().unwrap();
-    let commit = || Commit {
+    let commit = || TacticalCommit {
         expected_dataset: dataset.clone(),
         expected_revision: snapshot.revision,
-        writes: vec![],
+        targets: BTreeMap::new(),
     };
     result.observations = vec![
         TacticalObservation {
@@ -1124,30 +1168,35 @@ fn retained_binding_rejects_staged_catalog_changes_for_an_alternate_target() {
         label: "Alternate puzzle".into(),
         provenance: vec![],
     };
-    let mut catalog = before.catalog.clone();
-    catalog
+    let target_id = alternate.target_id();
+    let item = compile_tactics(&[alternate])
+        .unwrap()
         .items
-        .extend(compile_tactics(&[alternate.clone()]).unwrap().items);
-    let mut revised = analysis("one", Some(&alternate.target_id()));
+        .remove(&target_id)
+        .unwrap();
+    let mut revised = analysis("one", Some(&target_id));
     revised.analysis_version = "stale-training-plan".into();
     let result = store.commit_tactical_analysis(
-        Commit {
+        TacticalCommit {
             expected_dataset: before.dataset.clone(),
             expected_revision: before.revision,
-            writes: vec![
-                Write::Catalog(catalog),
-                Write::Learning {
-                    target: alternate.target_id(),
-                    state: DailyLearning::introduce_capture(
-                        &Default::default(),
-                        StudyTime {
-                            day: StudyDay(10),
-                            unix_ms: 1_000,
-                        },
-                    )
-                    .unwrap(),
+            targets: [(
+                target_id,
+                TacticalTargetChange {
+                    content: Some(item),
+                    introduction: Some(
+                        DailyLearning::introduce_capture(
+                            &Default::default(),
+                            StudyTime {
+                                day: StudyDay(10),
+                                unix_ms: 1_000,
+                            },
+                        )
+                        .unwrap(),
+                    ),
                 },
-            ],
+            )]
+            .into(),
         },
         &revised,
     );

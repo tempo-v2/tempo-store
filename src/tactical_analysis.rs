@@ -2,7 +2,7 @@
 use crate::GameRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tempo_types::{ContentVersion, Revision, TargetId};
+use tempo_types::{ContentVersion, DatasetId, Revision, TargetId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +84,28 @@ pub struct TacticalAnalysis {
     pub status: TacticalAnalysisStatus,
     pub error: Option<String>,
     pub observations: Vec<TacticalObservation>,
+}
+
+/// Dataset/revision fence for composing tactical acceptance without loading Study.
+pub struct TacticalAcceptanceBasis {
+    pub dataset: DatasetId,
+    pub revision: Revision,
+}
+
+/// Chess and Learning effects for a target receiving a new occurrence request.
+#[derive(Clone, Debug, Default)]
+pub struct TacticalTargetChange {
+    pub content: Option<tempo_chess::ContentItem>,
+    pub introduction: Option<tempo_learning::LearningState>,
+}
+
+/// Store validates that every proposed effect is for a new request before
+/// persisting it. An exact receipt replay applies no effects.
+#[derive(Clone, Debug)]
+pub struct TacticalCommit {
+    pub expected_dataset: DatasetId,
+    pub expected_revision: Revision,
+    pub targets: BTreeMap<TargetId, TacticalTargetChange>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,7 +219,6 @@ pub struct TacticalArchiveGame {
     pub end_ms: Option<i64>,
     pub fully_analyzed: bool,
 }
-
 
 /// Snapshot stamps. Archive input changes also advance the evidence stamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

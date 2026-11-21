@@ -78,11 +78,11 @@ pub use study_state::{StudyState, TargetCoverage};
 
 mod tactical_analysis;
 pub use tactical_analysis::{
-    AnalysisGameProgress, StoredTacticalObservation, TacticalAcceptance, TacticalAnalysis,
-    TacticalAnalysisStatus, TacticalArchiveCoverage, TacticalArchiveGame, TacticalArchiveMetadata,
-    TacticalDecisionDetails, TacticalDecisionRow, TacticalReportGeneration,
+    AnalysisGameProgress, StoredTacticalObservation, TacticalAcceptance, TacticalAcceptanceBasis,
+    TacticalAnalysis, TacticalAnalysisStatus, TacticalArchiveCoverage, TacticalArchiveGame,
+    TacticalArchiveMetadata, TacticalCommit, TacticalDecisionDetails, TacticalDecisionRow,
     TacticalGame, TacticalGameCursor, TacticalObservation, TacticalObservationPage,
-    TacticalPositionRun, TacticalPositionTask, TacticalPuzzleRef, TacticalRequest,
-    TacticalRequestAddress, TacticalRequestScope, TacticalStatistics, TacticalTrainingLink,
-    TacticalTrainingStatus,
+    TacticalPositionRun, TacticalPositionTask, TacticalPuzzleRef, TacticalReportGeneration,
+    TacticalRequest, TacticalRequestAddress, TacticalRequestScope, TacticalStatistics,
+    TacticalTargetChange, TacticalTrainingLink, TacticalTrainingStatus,
 };

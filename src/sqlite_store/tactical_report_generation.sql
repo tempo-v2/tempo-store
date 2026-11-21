@@ -10,6 +10,10 @@ INSERT INTO tactical_report_generation VALUES(1,0,0);
 CREATE INDEX tactical_report_comparisons
 ON game_comparisons(dataset_id,source,game_id,ordinal DESC);
 
+CREATE INDEX tactical_report_current_game
+ON tactical_observations(dataset_id,source,game_id,learner,report,ply)
+WHERE current=1;
+
 CREATE INDEX tactical_report_decisions
 ON tactical_observations(dataset_id,report,analysis_version,motif,id DESC)
 WHERE current=1;

@@ -75,11 +75,34 @@ pub enum RepertoireReset {
 /// [`crate::SqliteStore`] uses the same validation and publishes each batch
 /// inside one database transaction.
 pub trait Store {
+    /// Read only the dataset and revision needed to compose tactical acceptance.
+    fn tactical_acceptance_basis(&self) -> Result<crate::TacticalAcceptanceBasis, StoreError> {
+        Err(StoreError::Unsupported("tactical_acceptance_basis"))
+    }
+
+    /// Load the addressed target and genuine Chess-owned identity/alias matches.
+    fn tactical_content_matches(
+        &self,
+        _dataset: &DatasetId,
+        _lookup: &tempo_chess::TacticLookup,
+    ) -> Result<Vec<tempo_chess::ContentItem>, StoreError> {
+        Err(StoreError::Unsupported("tactical_content_matches"))
+    }
+
+    /// Load Learning only for the tactic selected by Chess for a new request.
+    fn tactical_target_learning(
+        &self,
+        _dataset: &DatasetId,
+        _target: &TargetId,
+    ) -> Result<Option<tempo_learning::LearningState>, StoreError> {
+        Err(StoreError::Unsupported("tactical_target_learning"))
+    }
+
     /// Atomically accept a complete analysis and its explicit puzzle/training effects.
     /// Replayed analysis identity returns the stored acceptance without applying writes.
     fn commit_tactical_analysis(
         &mut self,
-        _commit: Commit,
+        _commit: crate::TacticalCommit,
         _analysis: &crate::TacticalAnalysis,
     ) -> Result<crate::TacticalAcceptance, StoreError> {
         Err(StoreError::Unsupported("commit_tactical_analysis"))
