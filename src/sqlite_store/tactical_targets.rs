@@ -226,3 +226,90 @@ pub(super) fn require_target(
     }
     Ok(())
 }
+
+impl super::SqliteStore {
+    /// Page through accepted game-training bindings. Their versions and
+    /// delivery states belong to the request and are never rewritten here.
+    pub fn game_tactic_candidates(
+        &self,
+        dataset: &DatasetId,
+        before: i64,
+    ) -> Result<Vec<(i64, ContentItem)>, StoreError> {
+        let mut q = self
+            .connection
+            .prepare(
+                "SELECT r.id,c.item FROM tactical_requests r
+            JOIN current_content c ON c.dataset_id=r.dataset_id AND c.target_id=r.target_id
+            WHERE r.dataset_id=?1 AND r.id<?2 AND r.version=c.version AND (r.fulfilled=1 OR r.cancelled=1)
+            ORDER BY r.id DESC LIMIT 32",
+            )
+            .map_err(database_error)?;
+        let mut rows = q
+            .query(params![dataset.0, before])
+            .map_err(database_error)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().map_err(database_error)? {
+            result.push((row.get(0).map_err(database_error)?, text_value(row, 1)?));
+        }
+        Ok(result)
+    }
+
+    /// Publish a Chess-verified extension under an existing game binding.
+    /// Return false for a changed basis or work still pinned to this version.
+    pub fn publish_tactic_payoff(
+        &self,
+        dataset: &DatasetId,
+        request: i64,
+        extension: &tempo_chess::GeneratedTacticExtension,
+    ) -> Result<bool, StoreError> {
+        let basis = extension.prior();
+        let next = extension.replacement();
+        let tx =
+            Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+        let (actual, rev) = revision(&tx)?;
+        if &actual != dataset || current(&tx, dataset, &basis.target)?.as_ref() != Some(basis) {
+            return Ok(false);
+        }
+        let available:bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE id=?1 AND dataset_id=?2 AND target_id=?3 AND version=?4)
+            AND NOT EXISTS(SELECT 1 FROM tactical_requests WHERE dataset_id=?2 AND target_id=?3 AND fulfilled=0 AND cancelled=0)
+            AND NOT EXISTS(SELECT 1 FROM store_state JOIN attempts ON attempts.id=active_attempt_id WHERE attempts.target_id=?3)",
+            params![request,dataset.0,basis.target.0,basis.version.0.to_be_bytes().as_slice()],|r|r.get(0)).map_err(database_error)?;
+        if !available
+            || learning(&tx, &basis.target)?.is_some_and(|s| {
+                s.correction
+                    .is_some_and(|c| c.answer_version == basis.version)
+            })
+        {
+            return Ok(false);
+        }
+        let lookup = TacticLookup::from_item(next).expect("verified tactic");
+        if matches(&tx, dataset, &lookup)?
+            .iter()
+            .any(|item| item.target != basis.target)
+        {
+            return Ok(false);
+        }
+        let payload = encode(next)?;
+        let version = next.version.0.to_be_bytes();
+        tx.execute("INSERT INTO content_history(ordinal,dataset_id,target_id,version,item) VALUES((SELECT coalesce(max(ordinal)+1,0) FROM content_history),?1,?2,?3,?4)",params![dataset.0,next.target.0,version,payload]).map_err(database_error)?;
+        tx.execute(
+            "UPDATE current_content SET version=?1,item=?2 WHERE target_id=?3",
+            params![version, payload, next.target.0],
+        )
+        .map_err(database_error)?;
+        tx.execute(
+            "DELETE FROM tactical_identities WHERE target_id=?1",
+            [&next.target.0],
+        )
+        .map_err(database_error)?;
+        index_item(&tx, next)?;
+        let revision = rev
+            .0
+            .checked_add(1)
+            .ok_or_else(|| invalid("store revision exhausted"))?;
+        tx.execute("UPDATE store_state SET revision=?1,content_revision=content_revision+1 WHERE singleton=1",[revision.to_be_bytes()]).map_err(database_error)?;
+        tx.commit().map_err(database_error)?;
+        Ok(true)
+    }
+}
