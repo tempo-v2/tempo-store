@@ -29,6 +29,7 @@ mod save_snapshot;
 mod saved_reviews;
 mod tactical_analysis;
 mod tactical_targets;
+pub use tactical_targets::TacticPayoffPublication;
 
 use load_snapshot::load_snapshot;
 use save_snapshot::save_snapshot;

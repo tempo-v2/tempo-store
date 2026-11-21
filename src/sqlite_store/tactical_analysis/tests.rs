@@ -1628,3 +1628,101 @@ fn tactical_schema_15_backfills_lookup_and_preserves_schema_14_history() {
         0
     );
 }
+
+#[test]
+fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
+    use crate::TacticPayoffPublication::{Deferred, Obsolete, Published};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payoff.sqlite");
+    let fen = "r2qk1nr/ppp3pp/2p1p3/2b5/4P3/8/PPPP1PPP/RNBQK2R w KQkq - 0 1";
+    let plan =
+        tempo_chess::plan_tactical_puzzle(&Default::default(), fen, &"d1h5".into(), &[]).unwrap();
+    let target = plan.target;
+    let prior = plan.content.catalog.items[&target].clone();
+    let pv = ["d1h5", "g7g6", "h5c5", "g8f6"].map(str::to_owned);
+    let extension = tempo_chess::extend_generated_tactic(&prior, &pv)
+        .unwrap()
+        .unwrap();
+    let dataset: DatasetId = "dataset".into();
+    let mut store = SqliteStore::create(
+        &path,
+        dataset.clone(),
+        plan.content.catalog,
+        DailyLearning::default().settings(),
+    )
+    .unwrap();
+    game(&store, "one");
+    accept(&mut store, &analysis("one", Some(&target)), &target);
+    let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
+    let publish =
+        |s: &SqliteStore| s.publish_tactic_payoff(&dataset, request.id as i64, &extension);
+    assert_eq!(publish(&store).unwrap(), Deferred);
+    assert!(store.tactic_payoff_held(&dataset, &prior).unwrap());
+    let issued = issue_request(&mut store, &request, "old-version");
+    assert_eq!(publish(&store).unwrap(), Deferred);
+    let result = tempo_study::submit(
+        &ExactSequenceGrader,
+        &prior.definition,
+        &issued.attempt,
+        Revision(0),
+        &"d1h5".into(),
+    )
+    .unwrap();
+    assert_eq!(result.assessment, Some(tempo_types::Grade::Good));
+    let receipt = Receipt {
+        id: "finished".into(),
+        command: "old answer".into(),
+        result: ReceiptResult::Study(AnswerResult {
+            attempt: result.attempt.clone(),
+            feedback: Some(result.feedback),
+            assessment: None,
+            learning_effect: None,
+        }),
+    };
+    store
+        .commit_study(
+            Commit {
+                expected_dataset: dataset.clone(),
+                expected_revision: store.snapshot().unwrap().revision,
+                writes: vec![
+                    Write::Progress(StoredAttempt {
+                        attempt: result.attempt,
+                        ..issued.clone()
+                    }),
+                    Write::Active(None),
+                    Write::Receipt(receipt.clone()),
+                ],
+            },
+            StudyScope {
+                attempt: Some(&issued.attempt.id),
+                submission: Some(&receipt.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!store.tactic_payoff_held(&dataset, &prior).unwrap());
+    let before = store.snapshot().unwrap();
+    store.connection.execute_batch("CREATE TRIGGER fail_payoff BEFORE UPDATE ON current_content BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(publish(&store).is_err());
+    assert_eq!(store.snapshot().unwrap(), before);
+    store
+        .connection
+        .execute_batch("DROP TRIGGER fail_payoff")
+        .unwrap();
+    assert_eq!(publish(&store).unwrap(), Published);
+    drop(store);
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(publish(&store).unwrap(), Obsolete);
+    let after = store.snapshot().unwrap();
+    assert_eq!(after.catalog.items[&target], *extension.replacement());
+    assert_eq!(after.learning, before.learning);
+    assert_eq!(after.receipts, before.receipts);
+    assert_eq!(after.attempts, before.attempts);
+    assert_eq!(
+        store
+            .issued_item(&dataset, &target, prior.version)
+            .unwrap()
+            .unwrap(),
+        prior
+    );
+}
