@@ -86,6 +86,8 @@ fn schema_sixteen_opens_with_the_same_saved_results_and_no_repertoire_run() {
         .execute_batch(
             "DROP INDEX last_applied_human_test;
          DROP TABLE repertoire_run_steps;
+         DROP TABLE study_exclusions;
+         DROP INDEX tactical_requests_card_origin;
          PRAGMA user_version=16;",
         )
         .unwrap();

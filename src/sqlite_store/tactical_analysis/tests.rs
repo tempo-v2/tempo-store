@@ -768,6 +768,8 @@ fn remove_v15_projection(store: &SqliteStore) {
         .execute_batch(
             "DROP INDEX last_applied_human_test;
          DROP TABLE repertoire_run_steps;
+         DROP TABLE study_exclusions;
+         DROP INDEX tactical_requests_card_origin;
          DROP TABLE repertoire_coverage_gaps;
          DROP TABLE repertoire_coverage;
          DROP INDEX tactical_report_current_game;
