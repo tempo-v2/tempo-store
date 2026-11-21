@@ -19,6 +19,7 @@ pub(super) fn load_snapshot(transaction: &Transaction<'_>) -> Result<Snapshot, S
         .map_err(database_error)?;
 
     Ok(Snapshot {
+        repertoire_run: super::repertoire_runs::load(transaction, &dataset)?,
         dataset: DatasetId(dataset),
         revision: Revision(decode_counter(revision)?),
         active_attempt: active.map(AttemptId),

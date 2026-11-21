@@ -81,6 +81,9 @@ pub struct StoredAttempt {
     /// The presentation context available when Study issued this attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opponent_lead_in: Option<tempo_chess::OpponentLeadIn>,
+    /// Fix the warm-up presentation at issuance for resumed and replayed views.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repertoire_warmup: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<ActivityAcceptance>,
     /// Set by Tempo from the accepted Study transition, independent of the first grade.

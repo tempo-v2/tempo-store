@@ -161,17 +161,24 @@ mod tests {
             StandardLearning::<tempo_learning::FixedIntervalScheduler>::default().settings(),
         )
         .unwrap();
-        store.connection.execute_batch(
-            "DROP TABLE repertoire_coverage_gaps; DROP TABLE repertoire_coverage; PRAGMA user_version=15;"
-        ).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP INDEX last_applied_human_test;
+             DROP TABLE repertoire_run_steps;
+             DROP TABLE repertoire_coverage_gaps;
+             DROP TABLE repertoire_coverage;
+             PRAGMA user_version=15;",
+            )
+            .unwrap();
         drop(store);
         let upgraded = SqliteStore::open(&path).unwrap();
         assert_eq!(
             upgraded
                 .connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            16
+            super::super::SCHEMA_VERSION
         );
         assert!(upgraded.forecast_gaps(&dataset, None).unwrap().is_empty());
         assert!(

@@ -42,9 +42,12 @@ pub struct Commit {
 impl Commit {
     pub(super) fn daily_issued_attempt(&self) -> Result<&crate::StoredAttempt, crate::StoreError> {
         match self.writes.as_slice() {
-            [Write::Issue(record), Write::Active(Some(active))] if &record.attempt.id == active => {
-                Ok(record)
-            }
+            [Write::Issue(record), Write::Active(Some(active))]
+            | [
+                Write::Issue(record),
+                Write::Active(Some(active)),
+                Write::RepertoireRun(_),
+            ] if &record.attempt.id == active => Ok(record),
             _ => Err(crate::store_error::invalid(
                 "daily issuance must issue and activate exactly one attempt",
             )),
@@ -98,6 +101,7 @@ mod tests {
             relevance_reason: None,
             lesson: None,
             opponent_lead_in: None,
+            repertoire_warmup: false,
             acceptance: None,
             revealed_decision: None,
         };

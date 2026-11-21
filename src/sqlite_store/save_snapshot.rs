@@ -91,6 +91,13 @@ pub(super) fn save_snapshot(
         )
         .map_err(database_error)?;
 
+    if let Some(old) = previous {
+        if old.dataset != next.dataset {
+            super::repertoire_runs::save(transaction, &old.dataset, None)?;
+        } else if old.repertoire_run != next.repertoire_run {
+            super::repertoire_runs::save(transaction, &next.dataset, next.repertoire_run.as_ref())?;
+        }
+    }
     save_outcomes(transaction, previous, next)?;
     if let Some(previous) = previous {
         super::tactical_analysis::settle_attempts(transaction, previous, next)?;

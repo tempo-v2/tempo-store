@@ -4,7 +4,7 @@ use crate::{Commit, ContentState, Receipt, Snapshot, StoreError, StoredAttempt, 
 use tempo_chess::ContentItem;
 use tempo_learning::LearningState;
 use tempo_types::{
-    AttemptId, ContentVersion, DatasetId, Revision, StudyDay, SubmissionId, TargetId,
+    AttemptId, ContentVersion, DatasetId, Grade, Revision, StudyDay, SubmissionId, TargetId,
 };
 
 /// Current study reads exclude unrelated attempts and their outcomes.
@@ -75,6 +75,16 @@ pub enum RepertoireReset {
 /// [`crate::SqliteStore`] uses the same validation and publishes each batch
 /// inside one database transaction.
 pub trait Store {
+    /// The latest applied human Test grade on the addressed answer version.
+    /// Unknown includes imported learning without corresponding local history.
+    fn latest_applied_test(
+        &self,
+        _dataset: &DatasetId,
+        _target: &TargetId,
+        _version: ContentVersion,
+    ) -> Result<Option<Grade>, StoreError> {
+        Err(StoreError::Unsupported("latest_applied_test"))
+    }
     /// Read only the dataset and revision needed to compose tactical acceptance.
     fn tactical_acceptance_basis(&self) -> Result<crate::TacticalAcceptanceBasis, StoreError> {
         Err(StoreError::Unsupported("tactical_acceptance_basis"))

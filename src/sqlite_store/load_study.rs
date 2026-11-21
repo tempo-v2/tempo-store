@@ -113,6 +113,7 @@ pub(super) fn load_study(
         TargetCoverage::Selected(targets.into_iter().map(|id| TargetId(id.clone())).collect())
     };
     Ok(StudyState {
+        repertoire_run: super::repertoire_runs::load(tx, &dataset)?,
         suspended_repertoires: super::repertoire_suspensions::read(tx, &dataset)?,
         dataset: DatasetId(dataset),
         revision: Revision(decode_counter(revision)?),
@@ -145,6 +146,7 @@ pub(super) fn staging_image(state: StudyState) -> Snapshot {
         revision: state.revision,
         policy: state.policy,
         active_attempt: state.active_attempt,
+        repertoire_run: state.repertoire_run,
         attempts: state.attempts,
         assessments: state.assessments,
         receipts: state.receipts,

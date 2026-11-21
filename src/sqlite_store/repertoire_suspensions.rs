@@ -155,6 +155,14 @@ pub(super) fn apply(
     }
     .map_err(database_error)?;
     if change != 0 {
+        if command.activity == RepertoireActivity::Suspended
+            && state
+                .repertoire_run
+                .as_ref()
+                .is_some_and(|run| run.repertoire == command.repertoire)
+        {
+            writes.push(Write::RepertoireRun(None));
+        }
         let commit = Commit {
             expected_dataset: command.dataset.clone(),
             expected_revision,

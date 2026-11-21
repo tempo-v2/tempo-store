@@ -48,6 +48,8 @@ pub struct Snapshot {
     pub policy: SchedulerSettings,
     pub attempts: BTreeMap<AttemptId, StoredAttempt>,
     pub active_attempt: Option<AttemptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repertoire_run: Option<crate::RepertoireRun>,
     pub assessments: Vec<AssessmentRecord>,
     pub receipts: BTreeMap<SubmissionId, Receipt>,
     pub content_history: Vec<ContentHistory>,

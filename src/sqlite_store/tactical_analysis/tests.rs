@@ -144,6 +144,7 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
         acceptance: None,
         revealed_decision: None,
         opponent_lead_in: None,
+        repertoire_warmup: false,
     };
     store
         .commit_daily_issuance(
@@ -765,7 +766,9 @@ fn remove_v15_projection(store: &SqliteStore) {
     store
         .connection
         .execute_batch(
-            "DROP TABLE repertoire_coverage_gaps;
+            "DROP INDEX last_applied_human_test;
+         DROP TABLE repertoire_run_steps;
+         DROP TABLE repertoire_coverage_gaps;
          DROP TABLE repertoire_coverage;
          DROP INDEX tactical_report_current_game;
          DROP INDEX tactical_report_decisions;

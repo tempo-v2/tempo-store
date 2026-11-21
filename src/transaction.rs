@@ -46,6 +46,7 @@ pub(super) fn initial_snapshot(
         policy,
         attempts: BTreeMap::new(),
         active_attempt: None,
+        repertoire_run: None,
         assessments: vec![],
         receipts: BTreeMap::new(),
         content_history,

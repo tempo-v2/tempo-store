@@ -73,6 +73,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.relevance_reason != previous.relevance_reason
                 || record.lesson != previous.lesson
                 || record.opponent_lead_in != previous.opponent_lead_in
+                || record.repertoire_warmup != previous.repertoire_warmup
                 || (previous.acceptance.is_some() && record.acceptance != previous.acceptance)
                 || (record.mode.guided() && next.terminal.is_some())
                 || old.status != AttemptStatus::Active
@@ -172,6 +173,32 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
         Write::Active(id) => {
             state.active_attempt = id;
         }
+        Write::RepertoireRun(run) => {
+            if let Some(run) = &run {
+                let record = state
+                    .active_attempt
+                    .as_ref()
+                    .and_then(|id| state.attempts.get(id))
+                    .ok_or_else(|| invalid("pin a repertoire run with its active issue"))?;
+                run.validate_issue(record)?;
+            }
+            state.repertoire_run = run;
+        }
+        Write::SkipRepertoireWarmup(id) => {
+            let run = state
+                .repertoire_run
+                .as_mut()
+                .filter(|run| run.head() == Some(&id))
+                .ok_or_else(|| conflict("repertoire warm-up changed"))?;
+            let record = state
+                .attempts
+                .get(&id)
+                .ok_or_else(|| invalid("repertoire warm-up is missing"))?;
+            if !record.repertoire_warmup || record.attempt.status != AttemptStatus::Abandoned {
+                return Err(invalid("only an abandoned warm-up can be bypassed"));
+            }
+            run.skipped_warmup = true;
+        }
         Write::Restore {
             dataset,
             catalog,
@@ -190,6 +217,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
             state.learning = learning;
             state.policy = policy;
             state.active_attempt = None;
+            state.repertoire_run = None;
             remember_catalog(state);
         }
     }
