@@ -42,6 +42,7 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
         route: None,
         first_introduction: false,
         exercise_name: None,
+        tactic_attribution: None,
         relevance_reason: None,
         lesson: None,
         opponent_lead_in: None,

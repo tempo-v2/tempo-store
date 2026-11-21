@@ -16,8 +16,11 @@ impl SqliteStore {
                 "SELECT c.target_id, json_extract(c.item, '$.label') AS label,
                 json_extract(l.state, '$.first_introduced') IS NOT NULL AS introduced,
                 (json_extract(c.item, '$.status') = 'active'
-                    AND COALESCE(json_extract(l.state, '$.due') <= ?3, 0)) AS due
+                    AND x.target_id IS NULL
+                    AND COALESCE(json_extract(l.state, '$.due') <= ?3, 0)) AS due,
+                x.target_id IS NOT NULL AS removed_from_study
              FROM current_content c JOIN learning l USING (target_id)
+             LEFT JOIN study_exclusions x ON (x.dataset_id,x.target_id)=(c.dataset_id,c.target_id)
              WHERE c.repertoire IS NULL AND c.target_id > ?1
                 AND c.dataset_id = (SELECT dataset_id FROM store_state WHERE singleton=1)
                 AND (?2 = '' OR instr(lower(label), lower(?2)) > 0
@@ -43,6 +46,7 @@ impl SqliteStore {
                         label: row.get(1)?,
                         introduced: row.get(2)?,
                         due: row.get(3)?,
+                        removed_from_study: row.get(4)?,
                     })
                 },
             )

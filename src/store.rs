@@ -251,6 +251,15 @@ pub trait Store {
     }
 
     /// Change only the saved list, with exact command replay in the same transaction.
+    /// Return a durable retry result or the saved tactic's active attempt and revision.
+    fn tactic_exclusion(
+        &self,
+        _key: &crate::ReviewCommandKey<'_>,
+        _id: i64,
+    ) -> Result<crate::TacticExclusionRead, StoreError> {
+        Err(StoreError::Unsupported("tactic_exclusion"))
+    }
+
     fn write_saved_review(
         &mut self,
         _key: &crate::ReviewCommandKey<'_>,
@@ -380,6 +389,17 @@ pub trait Store {
                     && entry.item.version == version
             })
             .map(|entry| entry.item))
+    }
+
+    /// Read the requested game attribution for the exact target and content version.
+    fn tactic_game_origin(
+        &self,
+        _dataset: &DatasetId,
+        _target: &TargetId,
+        _version: ContentVersion,
+        _lookup: crate::TacticGameLookup<'_>,
+    ) -> Result<Option<crate::TacticGameOrigin>, StoreError> {
+        Ok(None)
     }
 
     /// Counts accepted reset commands independent of clock precision or ordering.
