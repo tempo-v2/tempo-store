@@ -70,6 +70,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.route != previous.route
                 || record.first_introduction != previous.first_introduction
                 || record.exercise_name != previous.exercise_name
+                || record.tactic_attribution != previous.tactic_attribution
                 || record.relevance_reason != previous.relevance_reason
                 || record.lesson != previous.lesson
                 || record.opponent_lead_in != previous.opponent_lead_in

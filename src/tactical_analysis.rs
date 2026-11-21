@@ -2,7 +2,7 @@
 use crate::GameRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tempo_types::{ContentVersion, DatasetId, Revision, TargetId};
+use tempo_types::{AttemptId, ContentVersion, DatasetId, Revision, TargetId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +18,34 @@ pub enum TacticalAnalysisStatus {
 pub struct TacticalPuzzleRef {
     pub target: TargetId,
     pub version: ContentVersion,
+}
+
+/// Select an exact accepted request, the retained binding of a legacy attempt,
+/// or representative attribution for a target issued by ordinary scheduling.
+pub enum TacticGameLookup<'a> {
+    Request(u64),
+    LegacyAttempt(&'a AttemptId),
+    Related,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TacticGameRelation {
+    IssuingFinding,
+    RelatedFinding,
+}
+
+/// A retained game-finding identity associated with the issued tactic version.
+/// The latest scan result can change independently of this binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TacticGameOrigin {
+    pub relation: TacticGameRelation,
+    pub source: String,
+    pub white: String,
+    pub black: String,
+    pub url: Option<String>,
+    pub ply: u32,
+    pub motif: String,
 }
 
 /// Identity of the Study request delivered by the application.

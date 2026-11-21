@@ -17,6 +17,7 @@ mod repertoire_run;
 mod saved_review;
 pub use saved_review::{
     ReviewCommandKey, ReviewPosition, ReviewWrite, SavedReview, SavedReviewContext,
+    TacticExclusionRead,
 };
 mod repertoire_activity;
 mod snapshot;
@@ -54,7 +55,8 @@ pub use store::{
 };
 pub use store_error::StoreError;
 pub use stored_attempt::{
-    AcceptanceKind, ActivityAcceptance, ActivityMode, RevealedDecision, StoredAttempt,
+    AcceptanceKind, ActivityAcceptance, ActivityMode, IssuedTacticAttribution, RevealedDecision,
+    StoredAttempt,
 };
 pub use write::Write;
 
@@ -80,9 +82,10 @@ pub use study_state::{StudyState, TargetCoverage};
 
 mod tactical_analysis;
 pub use tactical_analysis::{
-    AnalysisGameProgress, StoredTacticalObservation, TacticalAcceptance, TacticalAcceptanceBasis,
-    TacticalAnalysis, TacticalAnalysisStatus, TacticalArchiveCoverage, TacticalArchiveMetadata,
-    TacticalCommit, TacticalDecisionDetails, TacticalDecisionRow, TacticalGame, TacticalGameCursor,
+    AnalysisGameProgress, StoredTacticalObservation, TacticGameLookup, TacticGameOrigin,
+    TacticGameRelation, TacticalAcceptance, TacticalAcceptanceBasis, TacticalAnalysis,
+    TacticalAnalysisStatus, TacticalArchiveCoverage, TacticalArchiveMetadata, TacticalCommit,
+    TacticalDecisionDetails, TacticalDecisionRow, TacticalGame, TacticalGameCursor,
     TacticalObservation, TacticalObservationPage, TacticalPositionRun, TacticalPositionTask,
     TacticalPuzzleRef, TacticalReportGeneration, TacticalRequest, TacticalRequestAddress,
     TacticalRequestScope, TacticalStatistics, TacticalTargetChange, TacticalTrainingLink,

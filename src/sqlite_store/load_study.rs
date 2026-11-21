@@ -107,6 +107,30 @@ pub(super) fn load_study(
         )?,
         None => BTreeMap::new(),
     };
+    let mut excluded_tactics = BTreeSet::new();
+    if scope.catalog {
+        excluded_tactics = read_selected(
+            tx,
+            "SELECT target_id FROM study_exclusions WHERE dataset_id=?1",
+            [&dataset],
+            |row| Ok(TargetId(row.get(0).map_err(database_error)?)),
+        )?;
+    } else {
+        let mut statement = tx
+            .prepare_cached(
+                "SELECT target_id FROM study_exclusions WHERE dataset_id=?1 AND target_id=?2",
+            )
+            .map_err(database_error)?;
+        for target in &targets {
+            excluded_tactics.extend(
+                statement
+                    .query_row(params![dataset, target], |row| row.get::<_, String>(0))
+                    .optional()
+                    .map_err(database_error)?
+                    .map(TargetId),
+            );
+        }
+    }
     let coverage = if scope.catalog {
         TargetCoverage::Complete
     } else {
@@ -115,6 +139,7 @@ pub(super) fn load_study(
     Ok(StudyState {
         repertoire_run: super::repertoire_runs::load(tx, &dataset)?,
         suspended_repertoires: super::repertoire_suspensions::read(tx, &dataset)?,
+        excluded_tactics,
         dataset: DatasetId(dataset),
         revision: Revision(decode_counter(revision)?),
         active_attempt: active.map(AttemptId),

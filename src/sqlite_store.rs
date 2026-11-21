@@ -37,7 +37,8 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
+const STUDY_EXCLUSIONS_SCHEMA: &str = include_str!("sqlite_store/study_exclusions.sql");
 const COVERAGE_SCHEMA: &str = include_str!("sqlite_store/coverage.sql");
 const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.sql");
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
@@ -172,6 +173,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(REPERTOIRE_RUNS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(STUDY_EXCLUSIONS_SCHEMA)
             .map_err(database_error)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -346,7 +350,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=16) {
+        if matches!(schema_version(&connection)?, 2..=17) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -441,6 +445,12 @@ impl SqliteStore {
             if schema_version(&tx)? == 16 {
                 tx.execute_batch(REPERTOIRE_RUNS_SCHEMA)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 17)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 17 {
+                tx.execute_batch(STUDY_EXCLUSIONS_SCHEMA)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -526,6 +536,14 @@ impl Store for SqliteStore {
         let _diagnostic =
             crate::diagnostics::Operation::new("sqlite.sqlite_store.saved_review_receipt");
         saved_reviews::receipt(&self.connection, key)
+    }
+
+    fn tactic_exclusion(
+        &self,
+        key: &crate::ReviewCommandKey<'_>,
+        id: i64,
+    ) -> Result<crate::TacticExclusionRead, StoreError> {
+        saved_reviews::exclusion_basis(&self.connection, key, id)
     }
 
     fn write_saved_review(
@@ -1227,6 +1245,50 @@ impl Store for SqliteStore {
             params![dataset.0, target.0, version.0.to_be_bytes().as_slice()], |row| row.get(0)
         ).optional().map_err(database_error)?;
         item.as_deref().map(row_values::decode).transpose()
+    }
+
+    fn tactic_game_origin(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+        lookup: crate::TacticGameLookup<'_>,
+    ) -> Result<Option<crate::TacticGameOrigin>, StoreError> {
+        use crate::{TacticGameLookup, TacticGameRelation};
+        use rusqlite::types::Value;
+        let (condition, key, relation) = match lookup {
+            TacticGameLookup::Request(id) => (
+                "r.id=?4",
+                Value::Integer(
+                    i64::try_from(id).map_err(|_| invalid("invalid tactical request ID"))?,
+                ),
+                TacticGameRelation::IssuingFinding,
+            ),
+            TacticGameLookup::LegacyAttempt(id) => (
+                "r.attempt_id=?4",
+                Value::Text(id.0.clone()),
+                TacticGameRelation::IssuingFinding,
+            ),
+            TacticGameLookup::Related => (
+                "?4 IS NULL",
+                Value::Null,
+                TacticGameRelation::RelatedFinding,
+            ),
+        };
+        self.connection.query_row(
+            &format!(
+                "SELECT o.source,g.white,g.black,g.url,o.ply,o.motif
+                 FROM tactical_requests r JOIN tactical_observations o ON (o.id,o.dataset_id)=(r.observation_id,r.dataset_id)
+                 JOIN games g ON (g.dataset_id,g.source,g.id)=(o.dataset_id,o.source,o.game_id)
+                 WHERE r.dataset_id=?1 AND r.target_id=?2 AND r.version=?3 AND {condition}
+                 ORDER BY r.id LIMIT 1"
+            ),
+            params![dataset.0, target.0, version.0.to_be_bytes().as_slice(), key],
+            |row| Ok(crate::TacticGameOrigin {
+                relation, source: row.get(0)?, white: row.get(1)?, black: row.get(2)?,
+                url: row.get(3)?, ply: row.get(4)?, motif: row.get(5)?,
+            }),
+        ).optional().map_err(database_error)
     }
 
     fn tactics_extra(&self, dataset: &DatasetId, day: StudyDay) -> Result<usize, StoreError> {

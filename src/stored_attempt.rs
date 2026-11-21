@@ -1,6 +1,6 @@
 //! StoredAttempt and its usage scenarios.
 
-use crate::ChessAttempt;
+use crate::{ChessAttempt, TacticGameOrigin};
 use serde::{Deserialize, Serialize};
 use tempo_types::{MissRevision, Revision, StudyTime};
 
@@ -43,6 +43,15 @@ pub struct RevealedDecision {
     pub decision_index: usize,
 }
 
+/// Presentation attribution recorded at issue, independent of exercise identity
+/// and the contents of the response shown to a blind learner.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IssuedTacticAttribution {
+    pub title: String,
+    pub provenance: Vec<String>,
+    pub game: Option<TacticGameOrigin>,
+}
+
 /// A Study attempt plus the learning context fixed when it was issued.
 ///
 /// # When to use
@@ -74,6 +83,9 @@ pub struct StoredAttempt {
     // Keep the historical SQLite JSON key readable by earlier binaries.
     #[serde(default, rename = "repertoire_name")]
     pub exercise_name: Option<String>,
+    /// Absent on attempts issued before origin attribution was retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tactic_attribution: Option<IssuedTacticAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relevance_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
