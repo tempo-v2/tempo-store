@@ -1,5 +1,8 @@
 //! Read one original planning basis and its compact facts in the same snapshot.
 
+mod active;
+pub use active::ActiveStudyWork;
+
 use super::{StudyDayAuthority, StudyProjectionBasis, authority, projection_state, sqlite_count};
 use crate::sqlite_store::{
     SqliteStore, database_error,
@@ -38,6 +41,7 @@ pub struct StudyPlanInputFacts {
     /// Exact deferrals above the committed cutoff, in acceptance order.
     /// Missing day authority and a proved empty set are distinct.
     pub effective_deferrals: Option<Vec<DeferredWork>>,
+    pub active_work: ActiveStudyWork,
     pub expected_targets: usize,
     pub targets: Vec<StudyPlanTargetFacts>,
     /// Authored routes in durable order with no PGN or playable definitions.
@@ -130,6 +134,7 @@ fn capture_inputs(
         profile: capture_profile(tx, dataset)?,
         day_authority,
         effective_deferrals,
+        active_work: active::capture_active(tx, &basis.plan.dataset)?,
         basis,
         expected_targets,
         targets,
@@ -303,6 +308,8 @@ mod tests {
                         | "study_projection_state"
                         | "study_day_authority"
                         | "study_deferrals"
+                        | "attempts"
+                        | "assessments"
                         | "current_content"
                         | "learning"
                         | "repertoire_lines"
@@ -323,6 +330,7 @@ mod tests {
         assert!(access.denied.is_empty(), "{:?}", access.denied);
         assert_eq!(captured.basis, basis);
         assert_eq!(captured.profile, None);
+        assert_eq!(captured.active_work, ActiveStudyWork::None);
         assert_eq!(captured.effective_deferrals, Some(vec![]));
         assert_eq!(captured.expected_targets, 3);
         assert_eq!(captured.targets.len(), 3);
@@ -523,6 +531,227 @@ mod tests {
             .unwrap();
         let captured = incomplete(store.capture_study_plan(&dataset).unwrap());
         assert_eq!(captured.effective_deferrals, None);
+    }
+
+    #[test]
+    fn plan_capture_keeps_a_legacy_active_slot_unresolved() {
+        use crate::{Commit, Store, Write, test_support::issued_record};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut store, dataset) = fixture(&directory.path().join("study.sqlite"));
+        store.observe_study_day(&dataset, DAY).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        let record = issued_record(&snapshot);
+        let attempt_id = record.attempt.id.clone();
+        store
+            .commit(Commit {
+                expected_revision: snapshot.revision,
+                expected_dataset: dataset.clone(),
+                writes: vec![
+                    Write::Issue(record),
+                    Write::Active(Some(attempt_id.clone())),
+                ],
+            })
+            .unwrap();
+        let captured = incomplete(store.capture_study_plan(&dataset).unwrap());
+        assert_eq!(
+            captured.active_work,
+            ActiveStudyWork::LegacyTokenless { attempt_id }
+        );
+    }
+
+    #[test]
+    fn plan_capture_uses_only_the_active_tests_immutable_correction_binding_after_rollover() {
+        use crate::{
+            AcceptanceKind, ActivityAcceptance, AnswerResult, AssessmentKey, AssessmentRecord,
+            Commit, Receipt, ReceiptResult, Store, Write, test_support::issued_record,
+        };
+        use tempo_chess::ExactSequenceGrader;
+        use tempo_learning::{AssessmentInput, AssessmentSource};
+        use tempo_types::{Grade, WorkToken};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("study.sqlite");
+        let (mut store, dataset) = fixture(&path);
+        store.observe_study_day(&dataset, DAY).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        let mut record = issued_record(&snapshot);
+        let attempt_id = record.attempt.id.clone();
+        let target = record.attempt.target.clone();
+        let version = record.attempt.content_version;
+        let issued = WorkToken {
+            day: record.issued_at.day,
+            obligation: WorkObligation {
+                target: target.clone(),
+                version,
+                kind: WorkKind::Test,
+                revision: record.issued_miss_revision,
+            },
+        };
+        record.issued_work = Some(issued.clone());
+        store
+            .commit(Commit {
+                expected_revision: snapshot.revision,
+                expected_dataset: dataset.clone(),
+                writes: vec![
+                    Write::Issue(record.clone()),
+                    Write::Active(Some(attempt_id.clone())),
+                ],
+            })
+            .unwrap();
+
+        let (result, access) = probe_access(
+            &mut store,
+            |action| {
+                matches!(
+                    action,
+                    AuthAction::Read {
+                        table_name: "assessments",
+                        ..
+                    }
+                )
+            },
+            |store| store.capture_study_plan(&dataset),
+        );
+        assert!(access.denied.is_empty());
+        assert_eq!(
+            incomplete(result.unwrap()).active_work,
+            ActiveStudyWork::Issued {
+                attempt_id: attempt_id.clone(),
+                issued: issued.clone(),
+                correction: None,
+            }
+        );
+
+        let snapshot = store.snapshot().unwrap();
+        let progress = tempo_study::submit(
+            &ExactSequenceGrader,
+            &snapshot.catalog.items[&target].definition,
+            &record.attempt,
+            record.attempt.revision,
+            &"d2d4".into(),
+        )
+        .unwrap();
+        let accepted_at = StudyTime {
+            day: StudyDay(DAY.0 + 1),
+            unix_ms: 950_400_000,
+        };
+        let input = AssessmentInput {
+            grade: Grade::Again,
+            accepted_at,
+            source: AssessmentSource::Human {
+                attempt_id: attempt_id.clone(),
+                issued_miss_revision: record.issued_miss_revision,
+            },
+        };
+        let transition = DailyLearning::default()
+            .assess_prepared_test(
+                &snapshot.learning[&target],
+                &input,
+                version,
+                record.issued_at,
+            )
+            .unwrap();
+        let bound_revision = transition.state.miss_revision;
+        let receipt = Receipt {
+            id: "fixture-first-miss".into(),
+            command: "fixture exact command".into(),
+            result: ReceiptResult::Study(AnswerResult {
+                attempt: progress.attempt.clone(),
+                feedback: Some(progress.feedback),
+                assessment: progress.assessment,
+                learning_effect: Some(transition.effect),
+            }),
+        };
+        store
+            .commit(Commit {
+                expected_revision: snapshot.revision,
+                expected_dataset: dataset.clone(),
+                writes: vec![
+                    Write::Progress(crate::StoredAttempt {
+                        attempt: progress.attempt,
+                        acceptance: Some(ActivityAcceptance {
+                            at: accepted_at,
+                            kind: AcceptanceKind::WrongMove {
+                                uci: "d2d4".into(),
+                                decision_index: 0,
+                            },
+                        }),
+                        ..record
+                    }),
+                    Write::Learning {
+                        target: target.clone(),
+                        state: transition.state.clone(),
+                    },
+                    Write::Assessment(AssessmentRecord {
+                        key: AssessmentKey::Human(attempt_id.clone()),
+                        dataset: dataset.clone(),
+                        target: target.clone(),
+                        content_version: version,
+                        input,
+                        transition,
+                    }),
+                    Write::Receipt(receipt),
+                ],
+            })
+            .unwrap();
+        // The current Learning revision and legacy attempt decoration are
+        // intentionally different from this attempt's accepted binding.
+        store
+            .connection
+            .execute(
+                "UPDATE learning SET state=json_set(state,'$.miss_revision',17) WHERE target_id=?1",
+                [&target.0],
+            )
+            .unwrap();
+        drop(store);
+
+        let mut store = SqliteStore::open(&path).unwrap();
+        store
+            .observe_study_day(&dataset, StudyDay(DAY.0 + 2))
+            .unwrap();
+        store.connection.execute(
+            "UPDATE attempts SET record=json_set(record,'$.lesson','irrelevant invalid lesson') WHERE id=?1",
+            [&attempt_id.0],
+        ).unwrap();
+        let (result, access) = probe_access(
+            &mut store,
+            |action| {
+                matches!(
+                    action,
+                    AuthAction::Read {
+                        table_name: "receipts" | "study_plan_generations" | "study_plan_entries",
+                        ..
+                    }
+                )
+            },
+            |store| store.capture_study_plan(&dataset),
+        );
+        assert!(access.denied.is_empty());
+        assert_eq!(
+            incomplete(result.unwrap()).active_work,
+            ActiveStudyWork::Issued {
+                attempt_id,
+                issued,
+                correction: Some(WorkToken {
+                    day: accepted_at.day,
+                    obligation: WorkObligation {
+                        target,
+                        version,
+                        kind: WorkKind::Correction,
+                        revision: bound_revision
+                    },
+                }),
+            }
+        );
+        store
+            .connection
+            .execute("DELETE FROM assessments", [])
+            .unwrap();
+        assert_eq!(
+            store.capture_study_plan(&dataset).unwrap_err(),
+            invalid("missing accepted assessment for active Study correction")
+        );
     }
 
     #[test]

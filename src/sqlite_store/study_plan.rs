@@ -9,7 +9,7 @@ pub use resume_skipped::ResumeSkippedOutcome;
 
 mod capture;
 pub use capture::{
-    StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProfileFacts,
+    ActiveStudyWork, StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProfileFacts,
     StudyThemeSelection,
 };
 

@@ -52,8 +52,9 @@ pub use repertoire_activity::{
 pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
 pub use sqlite_store::{
-    PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, ResumeSkippedOutcome, SqliteStore,
-    StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts,
+    ActiveStudyWork, PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult,
+    ResumeSkippedOutcome, SqliteStore, StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts,
+    StudyPlanTargetFacts,
     StudyProfileFacts, StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
     TacticPayoffPublication,
 };
