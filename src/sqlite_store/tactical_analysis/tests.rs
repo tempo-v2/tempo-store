@@ -135,6 +135,7 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
         },
         issued_revision: Some(snapshot.revision),
         issued_miss_revision: snapshot.learning[&request.target].miss_revision,
+        issued_work: None,
         mode: ActivityMode::Practice,
         route: None,
         first_introduction: false,

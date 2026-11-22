@@ -38,6 +38,7 @@ pub(crate) fn issued_record(snapshot: &Snapshot) -> StoredAttempt {
         },
         issued_revision: Some(snapshot.revision),
         issued_miss_revision: snapshot.learning[&target].miss_revision,
+        issued_work: None,
         mode: crate::ActivityMode::Test,
         route: None,
         first_introduction: false,

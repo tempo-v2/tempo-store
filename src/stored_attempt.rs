@@ -2,7 +2,7 @@
 
 use crate::{ChessAttempt, TacticGameOrigin};
 use serde::{Deserialize, Serialize};
-use tempo_types::{MissRevision, Revision, StudyTime};
+use tempo_types::{MissRevision, Revision, StudyTime, WorkKind, WorkToken};
 
 /// Fixed when an activity is durably issued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +76,10 @@ pub struct StoredAttempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_revision: Option<Revision>,
     pub issued_miss_revision: MissRevision,
+    /// Exact obligation selected by the prepared plan at issue. Legacy attempts
+    /// have no token, and a subsequent generation never supplies one for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_work: Option<WorkToken>,
     #[serde(default)]
     pub mode: ActivityMode,
     #[serde(default)]
@@ -104,6 +108,25 @@ pub struct StoredAttempt {
     /// Set by Tempo from the accepted Study transition, independent of the first grade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revealed_decision: Option<RevealedDecision>,
+}
+
+impl StoredAttempt {
+    pub(crate) fn has_consistent_work_identity(&self) -> bool {
+        let Some(work) = &self.issued_work else {
+            return true;
+        };
+        let kind = match self.mode {
+            ActivityMode::Teach => WorkKind::Teach,
+            ActivityMode::Test => WorkKind::Test,
+            ActivityMode::Repair => WorkKind::Correction,
+            ActivityMode::Practice => return false,
+        };
+        work.day == self.issued_at.day
+            && work.obligation.target == self.attempt.target
+            && work.obligation.version == self.attempt.content_version
+            && work.obligation.revision == self.issued_miss_revision
+            && work.obligation.kind == kind
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +197,86 @@ mod tests {
         let after = store.snapshot().unwrap();
         assert_eq!(after.attempts[&AttemptId::from("attempt-1")], valid);
         assert_eq!(after.active_attempt, Some(valid.attempt.id));
+    }
+
+    #[test]
+    fn issued_work_is_durable_without_a_generation_and_cannot_change_on_progress() {
+        use crate::{
+            SqliteStore,
+            test_support::{policy, successful_answer_writes},
+        };
+        use tempo_learning::LearningPolicy;
+        use tempo_types::{StudyDay, WorkKind, WorkObligation, WorkToken};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("issued.sqlite");
+        let mut store = SqliteStore::create(
+            &path,
+            "issued-work".into(),
+            demo_catalog(),
+            policy().settings(),
+        )
+        .unwrap();
+        let before = store.snapshot().unwrap();
+        let mut issued = issued_record(&before);
+        let legacy = serde_json::to_value(&issued).unwrap();
+        assert!(legacy.get("issued_work").is_none());
+        assert_eq!(
+            serde_json::from_value::<super::StoredAttempt>(legacy).unwrap(),
+            issued
+        );
+        let work = WorkToken {
+            day: issued.issued_at.day,
+            obligation: WorkObligation {
+                target: issued.attempt.target.clone(),
+                version: issued.attempt.content_version,
+                kind: WorkKind::Test,
+                revision: issued.issued_miss_revision,
+            },
+        };
+        let mut mismatched = issued.clone();
+        mismatched.issued_work = Some(WorkToken {
+            day: StudyDay(work.day.0 + 1),
+            ..work.clone()
+        });
+        let commit = |record: super::StoredAttempt| {
+            let active = record.attempt.id.clone();
+            Commit {
+                expected_revision: before.revision,
+                expected_dataset: before.dataset.clone(),
+                writes: vec![Write::Issue(record), Write::Active(Some(active))],
+            }
+        };
+        assert!(matches!(
+            store.commit(commit(mismatched)),
+            Err(StoreError::Invalid(_))
+        ));
+        issued.issued_work = Some(work.clone());
+        store.commit(commit(issued.clone())).unwrap();
+        drop(store);
+
+        let mut store = SqliteStore::open(&path).unwrap();
+        let before = store.snapshot().unwrap();
+        let id = &issued.attempt.id;
+        assert_eq!(before.attempts[id].issued_work, Some(work.clone()));
+        assert_eq!(store.study_plan_head(&before.dataset).unwrap(), None);
+        let mut changed = successful_answer_writes(&before);
+        for write in &mut changed {
+            if let Write::Progress(record) = write {
+                record.issued_work = None;
+            }
+        }
+        let commit = |writes| Commit {
+            expected_revision: before.revision,
+            expected_dataset: before.dataset.clone(),
+            writes,
+        };
+        assert!(matches!(
+            store.commit(commit(changed)),
+            Err(StoreError::Conflict(_))
+        ));
+        assert_eq!(store.snapshot().unwrap(), before);
+        store.commit(commit(successful_answer_writes(&before))).unwrap();
+        assert_eq!(store.snapshot().unwrap().attempts[id].issued_work, Some(work));
     }
 }
