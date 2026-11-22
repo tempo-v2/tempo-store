@@ -3,7 +3,7 @@
 use crate::store_error::conflict;
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentState, PortableGameEvidence, Snapshot, Store, StoreError, StudyOrderingWrite,
+    Commit, DatasetIdentity, ContentState, PortableGameEvidence, Snapshot, Store, StoreError, StudyOrderingWrite,
     StudyScope, StudyState,
 };
 use tempo_chess::Catalog;
@@ -45,6 +45,12 @@ impl MemoryStore {
     /// Fault injection after staging, before publishing, for transaction contract tests.
     pub fn fail_next_commit(&mut self) {
         self.fail_next_commit = true;
+    }
+}
+
+impl DatasetIdentity for MemoryStore {
+    fn dataset_id(&self) -> Result<DatasetId, StoreError> {
+        Ok(self.state.dataset.clone())
     }
 }
 

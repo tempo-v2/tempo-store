@@ -3,7 +3,7 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
+    Commit, DatasetIdentity, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
     RepertoireDocument, RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
     StudyState, Write,
 };
@@ -542,6 +542,18 @@ impl SqliteStore {
 }
 
 mod tactic_page;
+
+impl DatasetIdentity for SqliteStore {
+    fn dataset_id(&self) -> Result<DatasetId, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT dataset_id FROM store_state WHERE singleton=1",
+                [],
+                |row| row.get(0).map(DatasetId),
+            )
+            .map_err(database_error)
+    }
+}
 
 impl Store for SqliteStore {
     fn latest_applied_test(
@@ -1767,3 +1779,47 @@ fn database_error(error: rusqlite::Error) -> StoreError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dataset_identity_tests {
+    use super::*;
+    use tempo_learning::{DailyLearning, LearningPolicy};
+
+    #[test]
+    fn metadata_context_reads_only_the_dataset_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::create(
+            dir.path().join("metadata.sqlite"),
+            "identity-only".into(),
+            Catalog::default(),
+            DailyLearning::default().settings(),
+        )
+        .unwrap();
+        store
+            .connection
+            .execute("UPDATE store_state SET policy='{}'", [])
+            .unwrap();
+        let (result, access) = operation_probe::probe_access(
+            &mut store,
+            |action| {
+                !matches!(
+                    action,
+                    rusqlite::hooks::AuthAction::Read {
+                        table_name: "store_state",
+                        column_name: "dataset_id" | "singleton",
+                    }
+                )
+            },
+            |store| store.dataset_id(),
+        );
+        assert_eq!(result.unwrap(), DatasetId("identity-only".into()));
+        assert!(access.denied.is_empty());
+        assert!(!access.allowed.is_empty());
+
+        store
+            .connection
+            .execute("DELETE FROM store_state", [])
+            .unwrap();
+        assert!(store.dataset_id().is_err());
+    }
+}

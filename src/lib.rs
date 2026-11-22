@@ -50,7 +50,8 @@ pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
 pub use sqlite_store::{SqliteStore, TacticPayoffPublication};
 pub use store::{
-    ContentReceipt, ContentSource, RepertoireDocument, RepertoirePartition, RepertoireReset, Store,
+    ContentReceipt, ContentSource, DatasetIdentity, RepertoireDocument, RepertoirePartition,
+    RepertoireReset, Store,
     StudyOrderingWrite, StudyScope,
 };
 pub use store_error::StoreError;
