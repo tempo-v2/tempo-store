@@ -296,8 +296,9 @@ pub(super) fn read(
     model: &str,
 ) -> Result<BTreeMap<TargetId, GameTargetRelevance>, StoreError> {
     let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_relevance.read");
+    // Reuse one set of verified reach rows so SQLite can index the join by target.
     let mut query = connection.prepare_cached(
-        "WITH modeled AS (
+        "WITH modeled AS MATERIALIZED (
            SELECT reach.target_id,reach.millionths FROM game_model_reach AS reach
            JOIN game_model_inputs AS input USING(dataset_id,repertoire_id,input_key)
            WHERE reach.dataset_id=?1 AND reach.model_key=?2 AND input.state='verified'
