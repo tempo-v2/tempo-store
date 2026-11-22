@@ -1,5 +1,9 @@
 //! Store the prepared order in bounded, fenced SQLite transactions.
 
+mod authority;
+pub use authority::{StudyDayAuthority, StudyProfilePlanEffect};
+pub(super) use authority::{initialize_authority, migrate_authority};
+
 mod capture;
 pub use capture::{StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts};
 
@@ -89,6 +93,7 @@ impl SqliteStore {
                 state.membership_epoch = MembershipEpoch(next_epoch(state.membership_epoch.0)?);
                 state.summary_epoch = SummaryEpoch(next_epoch(state.summary_epoch.0)?);
             }
+            authority::ensure_day(&transaction, dataset, day)?;
             state.day = Some(day);
             state.summary_dirty = true;
             transaction
@@ -644,7 +649,9 @@ fn read_generation(value: i64) -> Result<PlanGeneration, StoreError> {
 pub(super) fn remove_schema_for_prior_version_fixture(connection: &Connection) {
     connection
         .execute_batch(
-            "DROP TABLE study_projection_state;
+            "DROP TABLE study_deferrals;
+             DROP TABLE study_day_authority;
+             DROP TABLE study_projection_state;
              DROP TABLE study_plan_entries;
              DROP TABLE study_plan_generations;",
         )

@@ -454,7 +454,10 @@ fn plan_generation_storage_schema24_keeps_previous_schema_authority() {
     drop(store);
 
     let store = SqliteStore::open(directory.path().join("study.sqlite")).unwrap();
-    assert_eq!(super::super::schema_version(&store.connection).unwrap(), 24);
+    assert_eq!(
+        super::super::schema_version(&store.connection).unwrap(),
+        super::super::SCHEMA_VERSION
+    );
     assert_eq!(store.snapshot().unwrap(), issued);
     assert!(store.study_plan_head(&dataset).unwrap().is_none());
     assert!(store.study_projection_basis(&dataset).unwrap().is_none());

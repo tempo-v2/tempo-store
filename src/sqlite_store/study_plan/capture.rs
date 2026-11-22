@@ -1,6 +1,6 @@
 //! Read one original planning basis and its compact facts in the same snapshot.
 
-use super::{StudyProjectionBasis, projection_state};
+use super::{StudyDayAuthority, StudyProjectionBasis, authority, projection_state};
 use crate::sqlite_store::{
     SqliteStore, database_error,
     load_snapshot::load_lines,
@@ -16,19 +16,20 @@ use tempo_types::{DatasetId, MissRevision};
 
 /// Whether a coherent original basis is available for the batch builder.
 ///
-/// Until the durable day authority is available, the read exposes compact
-/// facts for verification and stops short of authorizing publication.
+/// The read exposes compact facts for verification while producer adoption
+/// and issued-work authority are still pending.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StudyPlanCapture {
     MissingBasis,
-    /// Profile, quota, deferral and issued-work authority will complete this
-    /// capture in the same transaction. Missing authority never means empty.
+    /// The capture remains incomplete until the effective profile and all
+    /// relevant producers and issued-work facts share this transaction basis.
     Incomplete(StudyPlanInputFacts),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct StudyPlanInputFacts {
     pub basis: StudyProjectionBasis,
+    pub day_authority: Option<StudyDayAuthority>,
     pub expected_targets: usize,
     pub targets: Vec<StudyPlanTargetFacts>,
     /// Authored routes in durable order with no PGN or playable definitions.
@@ -94,6 +95,7 @@ fn capture_inputs(
         return Err(invalid("incomplete captured Study targets"));
     }
     Ok(StudyPlanInputFacts {
+        day_authority: authority::read_day(tx, &basis.plan.dataset, basis.plan.day)?,
         basis,
         expected_targets,
         targets,
@@ -168,6 +170,7 @@ mod tests {
                     table_name,
                     "store_state"
                         | "study_projection_state"
+                        | "study_day_authority"
                         | "current_content"
                         | "learning"
                         | "repertoire_lines"
