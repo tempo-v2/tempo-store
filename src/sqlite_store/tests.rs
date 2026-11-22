@@ -91,7 +91,7 @@ fn schema_sixteen_opens_with_the_same_saved_results_and_no_repertoire_run() {
          DROP TABLE tactical_qualifications;
          DROP TABLE study_exclusions;
          DROP INDEX tactical_requests_card_origin;
-         DROP TABLE repertoire_coverage_start; PRAGMA user_version=16;",
+         DROP TABLE repertoire_partition_lineage; DROP TABLE repertoire_coverage_start; PRAGMA user_version=16;",
         )
         .unwrap();
     drop(store);
@@ -500,6 +500,7 @@ fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
                 repertoire_id: repertoire,
                 expected_content_revision: content_revision,
                 model_input: &stamp,
+                forecast: None,
             }),
             Some(ContentReceipt {
                 request: "request",

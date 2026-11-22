@@ -782,7 +782,7 @@ fn remove_v15_projection(store: &SqliteStore) {
          DROP TABLE tactical_report_generation;
          DROP TABLE tactical_sources;
          DROP TABLE tactical_identities;
-         DROP TABLE repertoire_coverage_start; PRAGMA user_version=14;",
+         DROP TABLE repertoire_partition_lineage; DROP TABLE repertoire_coverage_start; PRAGMA user_version=14;",
         )
         .unwrap();
 }
@@ -1676,7 +1676,7 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
             include_str!("../study_exclusions.sql")
                 .split_once("CREATE VIEW tactical_report_requests")
                 .map(|(_, view)| {
-                    format!("CREATE VIEW tactical_report_requests{view} DROP TABLE repertoire_coverage_start; PRAGMA user_version=18;")
+                    format!("CREATE VIEW tactical_report_requests{view} DROP TABLE repertoire_partition_lineage; DROP TABLE repertoire_coverage_start; PRAGMA user_version=18;")
                 })
                 .unwrap()
                 .as_str(),

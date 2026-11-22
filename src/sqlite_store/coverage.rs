@@ -1,8 +1,8 @@
 //! Durable Games forecasts, published against verified repertoire inputs.
 use super::{SqliteStore, database_error, game_model, game_relevance, row_values};
 use crate::{
-    CoverageLineSetting, CoverageSummary, ForecastGap, ProjectionBook, ProjectionScope,
-    SavedCoverage, StoreError, store_error::conflict,
+    CoverageEditBasis, CoverageLineSetting, CoverageSummary, ForecastGap, ProjectionBook,
+    ProjectionScope, SavedCoverage, StoreError, store_error::conflict,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tempo_chess::{OpponentGap, PositionKey};
@@ -23,7 +23,7 @@ impl SqliteStore {
         .pop())
     }
 
-    pub fn coverage_start(
+    pub(super) fn read_coverage_start(
         &self,
         dataset: &DatasetId,
         repertoire: &str,
@@ -33,7 +33,7 @@ impl SqliteStore {
 
     /// Save the application's verified line against both the source document
     /// and the previous setting. A retry of the same value is a no-op.
-    pub fn save_coverage_start(
+    pub(super) fn write_coverage_start(
         &mut self,
         dataset: &DatasetId,
         repertoire: &str,
@@ -47,6 +47,18 @@ impl SqliteStore {
             .map_err(database_error)?;
         game_relevance::check_dataset(&tx, dataset)?;
         game_relevance::check_content_revision(&tx, content_revision)?;
+        let available: bool = tx.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM game_model_inputs AS input WHERE dataset_id=?1 AND repertoire_id=?2
+                AND state='verified'
+                AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions
+                                WHERE dataset_id=input.dataset_id AND repertoire_id=input.repertoire_id)
+            )",
+            params![dataset.0, repertoire], |row| row.get(0),
+        ).map_err(database_error)?;
+        if !available {
+            return Err(StoreError::StaleCoverage);
+        }
         let prior = starting_line(&tx, dataset, repertoire)?;
         if prior.moves == moves {
             return Ok(prior);
@@ -215,6 +227,33 @@ impl SqliteStore {
     }
 }
 
+pub(super) fn check_edit_basis(
+    connection: &Connection,
+    dataset: &DatasetId,
+    repertoire: &str,
+    basis: &CoverageEditBasis,
+) -> Result<(), StoreError> {
+    let current: bool = connection
+        .query_row(
+            "SELECT EXISTS (
+             SELECT 1 FROM repertoire_coverage AS report
+             LEFT JOIN repertoire_coverage_start AS start USING(dataset_id,repertoire_id)
+             WHERE report.dataset_id=?1 AND report.repertoire_id=?2
+               AND json_extract(report.summary,'$.request_id')=?3
+               AND coalesce(json_extract(report.summary,'$.starting_line.revision'),0)=?4
+               AND coalesce(start.revision,0)=?4
+         )",
+            params![dataset.0, repertoire, basis.report_id, basis.scope_revision],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if current {
+        Ok(())
+    } else {
+        Err(StoreError::StaleCoverage)
+    }
+}
+
 fn starting_line(
     connection: &Connection,
     dataset: &DatasetId,
@@ -265,7 +304,7 @@ mod tests {
              DROP INDEX tactical_requests_card_origin;
              DROP TABLE repertoire_coverage_gaps;
              DROP TABLE repertoire_coverage;
-             DROP TABLE repertoire_coverage_start; PRAGMA user_version=15;",
+             DROP TABLE repertoire_partition_lineage; DROP TABLE repertoire_coverage_start; PRAGMA user_version=15;",
             )
             .unwrap();
         drop(store);

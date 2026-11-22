@@ -41,3 +41,20 @@ pub struct CoverageLineSetting {
     pub revision: u64,
     pub moves: Vec<String>,
 }
+
+/// Authoritative forecast report and starting-line revision for an unaccepted
+/// repertoire edit. Store checks both in the same transaction as the edit.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CoverageEditBasis {
+    pub report_id: String,
+    pub scope_revision: u64,
+}
+
+impl ForecastGap {
+    pub fn edit_basis(&self) -> CoverageEditBasis {
+        CoverageEditBasis {
+            report_id: self.report_id.clone(),
+            scope_revision: self.starting_line.revision,
+        }
+    }
+}

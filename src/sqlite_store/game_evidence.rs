@@ -60,11 +60,9 @@ pub(super) fn save_failure(
 pub(super) fn copy_partition_boundaries(
     tx: &Transaction<'_>,
     dataset: &DatasetId,
-    source: &str,
-    destinations: &[&str],
-    mapping: &BTreeMap<TargetId, TargetId>,
+    partition: crate::RepertoirePartition<'_>,
 ) -> Result<(), StoreError> {
-    for destination in destinations {
+    for destination in partition.destinations {
         tx.execute(
             "INSERT INTO restored_reset_boundaries
              SELECT ?1,?3,max(reset_at_ms) FROM (
@@ -72,10 +70,23 @@ pub(super) fn copy_partition_boundaries(
                  UNION ALL
                  SELECT reset_at_ms FROM restored_reset_boundaries WHERE dataset_id=?1 AND repertoire_id=?2
              ) HAVING count(*)>0",
-            params![dataset.0, source, destination],
+            params![dataset.0, partition.source_repertoire, destination],
         ).map_err(database_error)?;
     }
-    for (destination, source) in mapping {
+    for (destination, source) in partition.source_by_destination {
+        let inserted = tx
+            .execute(
+                "INSERT INTO repertoire_partition_lineage
+             SELECT ?1,destination.target_id,origin.target_id,destination.version,?4
+             FROM current_content AS destination JOIN current_content AS origin
+               ON origin.dataset_id=destination.dataset_id AND origin.version=destination.version
+             WHERE destination.dataset_id=?1 AND destination.target_id=?2 AND origin.target_id=?3",
+                params![dataset.0, destination.0, source.0, partition.applied_at_ms],
+            )
+            .map_err(database_error)?;
+        if inserted != 1 {
+            return Err(invalid("Partition lineage needs matching answer versions."));
+        }
         tx.execute(
             "INSERT INTO game_failures
              SELECT dataset_id,source,game_id,?3,version,NULL,NULL
@@ -94,13 +105,15 @@ pub(super) fn partition_correction_game(
     if let Some(game) = correction_game(tx, lookup)? {
         return Ok(Some(game));
     }
-    let prefix = format!("opening-partition-v1:{}:", lookup.dataset.0);
     let origin: Option<(String, u64)> = tx
         .query_row(
-            "SELECT mapping.value, json_extract(reply,'$.applied_at_ms')
-         FROM content_receipts, json_each(reply,'$.learning_sources') AS mapping
-         WHERE substr(request,1,length(?1))=?1 AND mapping.key=?2",
-            params![prefix, lookup.target.0],
+            "SELECT source_target_id,applied_at_ms FROM repertoire_partition_lineage
+             WHERE dataset_id=?1 AND destination_target_id=?2 AND answer_version=?3",
+            params![
+                lookup.dataset.0,
+                lookup.target.0,
+                lookup.version.0.to_be_bytes().as_slice()
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
