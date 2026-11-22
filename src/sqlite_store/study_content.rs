@@ -8,7 +8,8 @@ use crate::{
     CurrentStudyDefinition, IssuedStudyDefinition, StoreError, StudyContentFacts,
     StudyContentFamily, StudyContentRead, StudyLessonRead,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use std::sync::LazyLock;
 use tempo_study::Exercise;
 use tempo_types::{ContentVersion, DatasetId, TargetId};
 
@@ -42,61 +43,63 @@ impl StudyContentRead for SqliteStore {
     }
 }
 
+// Use one compact projection for addressed checks and the coherent batch read.
+// Repertoire identity comes from normalization at write time, and tactic
+// membership is the typed value populated by ingress and schema 23.
+pub(super) const STUDY_CONTENT_FACT_COLUMNS: &str =
+    "c.target_id, c.version, c.repertoire, c.item -> '$.status',
+     c.item -> '$.tactic_policy_facts',
+     EXISTS (SELECT 1 FROM repertoire_suspensions s
+             WHERE s.dataset_id=c.dataset_id AND s.repertoire_id=c.repertoire),
+     EXISTS (SELECT 1 FROM study_exclusions x
+             WHERE x.dataset_id=c.dataset_id AND x.target_id=c.target_id),
+     EXISTS (SELECT 1 FROM tactical_qualifications q
+             WHERE (q.dataset_id,q.target_id,q.version)=(c.dataset_id,c.target_id,c.version)
+               AND q.result IN ('pending','withheld'))";
+
 pub(super) fn content_facts(
     connection: &Connection,
     dataset: &DatasetId,
     target: &TargetId,
 ) -> Result<Option<StudyContentFacts>, StoreError> {
-    // The normalized repertoire column comes from ContentKind at write time.
-    // Tactic membership is the typed value populated by ingress and schema 23.
-    let row = connection
-        .query_row(
-            "SELECT c.version, c.repertoire, c.item -> '$.status',
-                    c.item -> '$.tactic_policy_facts',
-                    EXISTS (SELECT 1 FROM repertoire_suspensions s
-                            WHERE s.dataset_id=c.dataset_id AND s.repertoire_id=c.repertoire),
-                    EXISTS (SELECT 1 FROM study_exclusions x
-                            WHERE x.dataset_id=c.dataset_id AND x.target_id=c.target_id),
-                    EXISTS (SELECT 1 FROM tactical_qualifications q
-                            WHERE (q.dataset_id,q.target_id,q.version)=(c.dataset_id,c.target_id,c.version)
-                              AND q.result IN ('pending','withheld'))
-             FROM current_content c
-             WHERE c.dataset_id=?1 AND c.target_id=?2",
-            params![dataset.0, target.0],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, bool>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, bool>(6)?,
-                ))
-            },
+    static ADDRESSED_SQL: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "SELECT {STUDY_CONTENT_FACT_COLUMNS}
+             FROM current_content c WHERE c.dataset_id=?1 AND c.target_id=?2"
         )
-        .optional()
+    });
+    let mut statement = connection
+        .prepare_cached(&ADDRESSED_SQL)
         .map_err(database_error)?;
-    row.map(
-        |(version, repertoire, status, membership, suspended, excluded, qualification_held)| {
-            let family = match repertoire {
-                Some(repertoire_id) => StudyContentFamily::Repertoire { repertoire_id },
-                None => StudyContentFamily::Tactic {
-                    membership: decode_optional(membership.as_deref())?,
-                },
-            };
-            Ok(StudyContentFacts {
-                target: target.clone(),
-                version: ContentVersion(decode_counter(version)?),
-                family,
-                status: decode(&status)?,
-                suspended,
-                excluded,
-                qualification_held,
-            })
-        },
-    )
-    .transpose()
+    let mut rows = statement
+        .query(params![dataset.0, target.0])
+        .map_err(database_error)?;
+    rows.next()
+        .map_err(database_error)?
+        .map(read_content_facts)
+        .transpose()
+}
+
+pub(super) fn read_content_facts(row: &Row<'_>) -> Result<StudyContentFacts, StoreError> {
+    let repertoire: Option<String> = row.get(2).map_err(database_error)?;
+    let family = match repertoire {
+        Some(repertoire_id) => StudyContentFamily::Repertoire { repertoire_id },
+        None => {
+            let membership: Option<String> = row.get(4).map_err(database_error)?;
+            StudyContentFamily::Tactic {
+                membership: decode_optional(membership.as_deref())?,
+            }
+        }
+    };
+    Ok(StudyContentFacts {
+        target: TargetId(row.get(0).map_err(database_error)?),
+        version: ContentVersion(decode_counter(row.get(1).map_err(database_error)?)?),
+        family,
+        status: decode(&row.get::<_, String>(3).map_err(database_error)?)?,
+        suspended: row.get(5).map_err(database_error)?,
+        excluded: row.get(6).map_err(database_error)?,
+        qualification_held: row.get(7).map_err(database_error)?,
+    })
 }
 
 pub(super) fn current_definition(

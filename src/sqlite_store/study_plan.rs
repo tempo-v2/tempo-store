@@ -1,5 +1,8 @@
 //! Store the prepared order in bounded, fenced SQLite transactions.
 
+mod capture;
+pub use capture::{StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts};
+
 use super::{
     STUDY_PLAN_SCHEMA, SqliteStore, database_error,
     row_values::{decode_counter, read_selected},
