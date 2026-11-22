@@ -196,7 +196,7 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
     mark_acceptance_projections_dirty(tx, &next.dataset)
 }
 
-fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
+pub(super) fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
     // There need not be any prepared generation or summary. If projection
     // state itself is missing, record a new dirty marker for this dataset.
     tx.execute(

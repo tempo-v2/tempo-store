@@ -5,6 +5,7 @@ use crate::{AnswerResult, ReceiptResult, StoreError, store_error::invalid};
 use rusqlite::{Connection, Params, Row, Transaction};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use tempo_types::StudyDay;
 
 pub(super) fn encode(value: &impl Serialize) -> Result<String, StoreError> {
     serde_json::to_string(value).map_err(|error| invalid(&format!("encode SQLite value: {error}")))
@@ -19,6 +20,14 @@ pub(super) const STUDY_RECEIPT_VERSION: u32 = 1;
 #[derive(Deserialize, Serialize)]
 enum StoredStudyReceipt<T> {
     Study(VersionedStudyOutcome<T>),
+    ResumeSkipped(VersionedStudyOutcome<StoredResumeSkipped>),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredResumeSkipped {
+    day: StudyDay,
+    cutoff: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -34,6 +43,12 @@ pub(super) fn encode_receipt(result: &ReceiptResult) -> Result<String, StoreErro
             receipt_version: STUDY_RECEIPT_VERSION,
             outcome: answer,
         })),
+        ReceiptResult::ResumeSkipped { day, cutoff } => {
+            encode(&StoredStudyReceipt::<&AnswerResult>::ResumeSkipped(VersionedStudyOutcome {
+                receipt_version: STUDY_RECEIPT_VERSION,
+                outcome: StoredResumeSkipped { day: *day, cutoff: *cutoff },
+            }))
+        }
         _ => encode(result),
     }
 }
@@ -42,20 +57,27 @@ pub(super) fn receipt_value(row: &Row<'_>, column: usize) -> Result<ReceiptResul
     decode_receipt(&row.get::<_, String>(column).map_err(database_error)?)
 }
 
-fn decode_receipt(encoded: &str) -> Result<ReceiptResult, StoreError> {
+pub(super) fn decode_receipt(encoded: &str) -> Result<ReceiptResult, StoreError> {
     let stored: Value = decode(encoded)?;
-    let Some(version) = stored
-        .get("Study")
-        .and_then(|study| study.get("receipt_version"))
-    else {
+    if stored.get("ResumeSkipped").is_none()
+        && stored.get("Study").and_then(|study| study.get("receipt_version")).is_none()
+    {
         // The installed legacy format stores AnswerResult directly under Study.
         return decode(encoded);
+    }
+    let (version, result) = match decode::<StoredStudyReceipt<AnswerResult>>(encoded)? {
+        StoredStudyReceipt::Study(receipt) => {
+            (receipt.receipt_version, ReceiptResult::Study(receipt.outcome))
+        }
+        StoredStudyReceipt::ResumeSkipped(receipt) => (
+            receipt.receipt_version,
+            ReceiptResult::ResumeSkipped { day: receipt.outcome.day, cutoff: receipt.outcome.cutoff },
+        ),
     };
-    if version.as_u64() != Some(u64::from(STUDY_RECEIPT_VERSION)) {
+    if version != STUDY_RECEIPT_VERSION {
         return Err(invalid("unsupported stored Study receipt version"));
     }
-    let StoredStudyReceipt::Study(versioned): StoredStudyReceipt<AnswerResult> = decode(encoded)?;
-    Ok(ReceiptResult::Study(versioned.outcome))
+    Ok(result)
 }
 
 pub(super) fn decode_counter(value: Vec<u8>) -> Result<u64, StoreError> {

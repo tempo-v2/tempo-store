@@ -3,7 +3,7 @@
 use crate::AnswerResult;
 use serde::{Deserialize, Serialize};
 use tempo_learning::Transition;
-use tempo_types::TargetId;
+use tempo_types::{StudyDay, TargetId};
 
 /// The exact reply saved for either a Study command or an external assessment.
 ///
@@ -20,6 +20,10 @@ pub enum ReceiptResult {
     Study(AnswerResult),
     TacticsAllowance {
         reply: String,
+    },
+    ResumeSkipped {
+        day: StudyDay,
+        cutoff: u64,
     },
     External {
         target: TargetId,

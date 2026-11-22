@@ -227,7 +227,9 @@ fn save_outcomes(
         if previous.is_none_or(|old| !old.receipts.contains_key(id)) {
             let attempt = match &receipt.result {
                 ReceiptResult::Study(result) => Some(&result.attempt.id.0),
-                ReceiptResult::External { .. } | ReceiptResult::TacticsAllowance { .. } => None,
+                ReceiptResult::External { .. }
+                | ReceiptResult::TacticsAllowance { .. }
+                | ReceiptResult::ResumeSkipped { .. } => None,
             };
             transaction
                 .execute(

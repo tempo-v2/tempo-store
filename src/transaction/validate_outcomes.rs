@@ -137,6 +137,9 @@ pub(super) fn validate_new_outcomes(
                     "allowance receipts require a daily allowance transaction",
                 ));
             }
+            ReceiptResult::ResumeSkipped { .. } => {
+                return Err(invalid("resume receipts require a day deferral transaction"));
+            }
             ReceiptResult::External { target, transition } => {
                 if !assessments.iter().any(|record| {
                     matches!(record.key, AssessmentKey::External { .. })
