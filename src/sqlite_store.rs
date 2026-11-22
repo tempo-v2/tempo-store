@@ -38,7 +38,8 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
+const TACTIC_QUALIFICATION_SCHEMA: &str = include_str!("sqlite_store/tactical_qualification.sql");
 const STUDY_EXCLUSIONS_SCHEMA: &str = include_str!("sqlite_store/study_exclusions.sql");
 const COVERAGE_SCHEMA: &str = include_str!("sqlite_store/coverage.sql");
 const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.sql");
@@ -177,6 +178,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(STUDY_EXCLUSIONS_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(TACTIC_QUALIFICATION_SCHEMA)
             .map_err(database_error)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -351,7 +355,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=17) {
+        if matches!(schema_version(&connection)?, 2..=18) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -452,6 +456,13 @@ impl SqliteStore {
             if schema_version(&tx)? == 17 {
                 tx.execute_batch(STUDY_EXCLUSIONS_SCHEMA)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 18)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 18 {
+                tx.execute_batch(TACTIC_QUALIFICATION_SCHEMA)
+                    .map_err(database_error)?;
+                tactical_targets::initialize_qualifications(&tx)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }

@@ -170,6 +170,8 @@ mod tests {
                 "DROP INDEX last_applied_human_test;
              DROP TABLE repertoire_run_steps;
              DROP VIEW tactical_report_requests;
+             DROP VIEW withheld_game_tactics;
+             DROP TABLE tactical_qualifications;
              DROP TABLE study_exclusions;
              DROP INDEX tactical_requests_card_origin;
              DROP TABLE repertoire_coverage_gaps;

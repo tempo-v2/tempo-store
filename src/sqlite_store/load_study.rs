@@ -131,6 +131,30 @@ pub(super) fn load_study(
             );
         }
     }
+    let withheld_game_tactics =
+        if scope.catalog {
+            read_selected(
+                tx,
+                "SELECT target_id FROM withheld_game_tactics WHERE dataset_id=?1",
+                [&dataset],
+                |row| Ok(TargetId(row.get(0).map_err(database_error)?)),
+            )?
+        } else {
+            let mut withheld = BTreeSet::new();
+            let mut query = tx.prepare_cached(
+            "SELECT target_id FROM withheld_game_tactics WHERE dataset_id=?1 AND target_id=?2",
+        ).map_err(database_error)?;
+            for target in &targets {
+                withheld.extend(
+                    query
+                        .query_row(params![dataset, target], |row| row.get::<_, String>(0))
+                        .optional()
+                        .map_err(database_error)?
+                        .map(TargetId),
+                );
+            }
+            withheld
+        };
     let coverage = if scope.catalog {
         TargetCoverage::Complete
     } else {
@@ -140,6 +164,7 @@ pub(super) fn load_study(
         repertoire_run: super::repertoire_runs::load(tx, &dataset)?,
         suspended_repertoires: super::repertoire_suspensions::read(tx, &dataset)?,
         excluded_tactics,
+        withheld_game_tactics,
         dataset: DatasetId(dataset),
         revision: Revision(decode_counter(revision)?),
         active_attempt: active.map(AttemptId),

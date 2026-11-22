@@ -155,6 +155,7 @@ pub(super) fn apply_change(
                 )
                 .map_err(database_error)?;
                 index_item(tx, item)?;
+                release_independent_tactic(tx, dataset, item)?;
             }
         } else {
             let _trace = Operation::new("sqlite.tactical_targets.insert_content");
@@ -236,70 +237,89 @@ pub enum TacticPayoffPublication {
     ConflictingDefinition,
 }
 
-fn payoff_held(
-    connection: &Connection,
+/// Exact import deduplication can give a generated target independent
+/// ownership. Its authored copy no longer depends on engine qualification.
+pub(super) fn release_independent_tactic(
+    tx: &Transaction<'_>,
     dataset: &DatasetId,
     item: &ContentItem,
-) -> Result<bool, StoreError> {
-    let pinned: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE dataset_id=?1 AND target_id=?2 AND fulfilled=0 AND cancelled=0)
-             OR EXISTS(SELECT 1 FROM store_state JOIN attempts ON attempts.id=active_attempt_id WHERE attempts.target_id=?2)",
-        params![dataset.0,item.target.0], |row| row.get(0)
+) -> Result<(), StoreError> {
+    let gated: bool = tx.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM tactical_qualifications WHERE dataset_id=?1 AND target_id=?2)",
+    ).map_err(database_error)?.query_row(params![dataset.0,item.target.0], |row| row.get(0))
+        .map_err(database_error)?;
+    if gated && !tempo_chess::game_generated_definition(item) {
+        tx.execute(
+            "DELETE FROM tactical_qualifications WHERE dataset_id=?1 AND target_id=?2",
+            params![dataset.0, item.target.0],
+        )
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+/// Install the quality gate only for verified game-owned content with a retained
+/// request. A game reference to an independent import does not transfer ownership.
+pub(super) fn initialize_qualifications(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let mut query = tx.prepare(
+        "SELECT c.dataset_id,c.item FROM current_content c WHERE EXISTS
+        (SELECT 1 FROM tactical_requests r WHERE (r.dataset_id,r.target_id)=(c.dataset_id,c.target_id))",
     ).map_err(database_error)?;
-    Ok(pinned
-        || learning(connection, &item.target)?.is_some_and(|state| {
-            state
-                .correction
-                .is_some_and(|correction| correction.answer_version == item.version)
-        }))
+    let mut rows = query.query([]).map_err(database_error)?;
+    while let Some(row) = rows.next().map_err(database_error)? {
+        let item: ContentItem = text_value(row, 1)?;
+        if tempo_chess::game_generated_definition(&item) {
+            let dataset: String = row.get(0).map_err(database_error)?;
+            tx.execute(
+                "INSERT INTO tactical_qualifications VALUES(?1,?2,?3,'pending')",
+                params![
+                    dataset,
+                    item.target.0,
+                    item.version.0.to_be_bytes().as_slice()
+                ],
+            )
+            .map_err(database_error)?;
+        }
+    }
+    Ok(())
 }
 
 impl super::SqliteStore {
-    /// Page through accepted game-training bindings. Their versions and
-    /// delivery states belong to the request and are never rewritten here.
-    pub fn game_tactic_candidates(
+    /// Pending work is keyed to the current definition, even when the
+    /// original request points to an older version.
+    pub fn pending_game_tactic_qualifications(
         &self,
         dataset: &DatasetId,
-        before: i64,
-    ) -> Result<Vec<(i64, ContentItem)>, StoreError> {
-        let mut q = self
-            .connection
-            .prepare(
-                "SELECT r.id,c.item FROM tactical_requests r
-            JOIN current_content c ON c.dataset_id=r.dataset_id AND c.target_id=r.target_id
-            WHERE r.dataset_id=?1 AND r.id<?2 AND r.version=c.version AND (r.fulfilled=1 OR r.cancelled=1)
-            ORDER BY r.id DESC LIMIT 32",
-            )
-            .map_err(database_error)?;
-        let mut rows = q
-            .query(params![dataset.0, before])
-            .map_err(database_error)?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().map_err(database_error)? {
-            result.push((row.get(0).map_err(database_error)?, text_value(row, 1)?));
-        }
-        Ok(result)
+        after: &str,
+    ) -> Result<Vec<ContentItem>, StoreError> {
+        read_selected(
+            &self.connection,
+            "SELECT c.item FROM tactical_qualifications q JOIN current_content c
+             USING(dataset_id,target_id,version)
+             WHERE q.dataset_id=?1 AND q.target_id>?2 AND q.result='pending'
+             ORDER BY q.target_id LIMIT 32",
+            params![dataset.0, after],
+            |row| text_value(row, 0),
+        )
     }
 
-    /// Skip engine work while Study still needs the previous definition.
-    pub fn tactic_payoff_held(
+    pub fn game_tactic_qualification_held(
         &self,
         dataset: &DatasetId,
         item: &ContentItem,
     ) -> Result<bool, StoreError> {
-        payoff_held(&self.connection, dataset, item)
+        qualification_held(&self.connection, dataset, item)
     }
 
-    /// Publish a Chess-verified extension under an existing game binding.
-    /// Recheck the exact basis and all pinned work inside the transaction.
-    pub fn publish_tactic_payoff(
+    /// Compare and commit Chess's result. A queued request can follow the new
+    /// version. A request already attached to an attempt retains its evidence.
+    pub fn publish_game_tactic_qualification(
         &self,
         dataset: &DatasetId,
-        request: i64,
-        extension: &tempo_chess::GeneratedTacticExtension,
+        basis: &ContentItem,
+        qualification: tempo_chess::GameTacticQualification,
     ) -> Result<TacticPayoffPublication, StoreError> {
-        let basis = extension.prior();
-        let next = extension.replacement();
+        use tempo_chess::GameTacticQualification;
         let tx =
             Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)
                 .map_err(database_error)?;
@@ -307,44 +327,116 @@ impl super::SqliteStore {
         if &actual != dataset || current(&tx, dataset, &basis.target)?.as_ref() != Some(basis) {
             return Ok(TacticPayoffPublication::Obsolete);
         }
-        let bound: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tactical_requests WHERE id=?1 AND dataset_id=?2 AND target_id=?3 AND version=?4)",
-            params![request, dataset.0, basis.target.0, basis.version.0.to_be_bytes().as_slice()],
-            |row| row.get(0),
-        ).map_err(database_error)?;
-        if !bound {
+        let version = basis.version.0.to_be_bytes();
+        let pending: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tactical_qualifications
+             WHERE (dataset_id,target_id,version)=(?1,?2,?3) AND result='pending')",
+                params![dataset.0, basis.target.0, version.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if !pending {
             return Ok(TacticPayoffPublication::Obsolete);
         }
-        if payoff_held(&tx, dataset, basis)? {
+        if qualification_held(&tx, dataset, basis)? {
             return Ok(TacticPayoffPublication::Deferred);
         }
-        let lookup = TacticLookup::from_item(next).expect("verified tactic");
-        if matches(&tx, dataset, &lookup)?
-            .iter()
-            .any(|item| item.target != basis.target)
-        {
-            return Ok(TacticPayoffPublication::ConflictingDefinition);
-        }
-        let payload = encode(next)?;
-        let version = next.version.0.to_be_bytes();
-        tx.execute("INSERT INTO content_history(ordinal,dataset_id,target_id,version,item) VALUES((SELECT coalesce(max(ordinal)+1,0) FROM content_history),?1,?2,?3,?4)",params![dataset.0,next.target.0,version,payload]).map_err(database_error)?;
+        let mut new_version = version;
+        let mut outcome = TacticPayoffPublication::Published;
+        let result = match qualification {
+            GameTacticQualification::Kept => "kept",
+            GameTacticQualification::Withheld => "withheld",
+            GameTacticQualification::Revised(verified) => {
+                let next = verified.replacement();
+                if verified.prior() != basis {
+                    return Err(invalid("invalid generated tactic revision"));
+                }
+                let lookup =
+                    TacticLookup::from_item(next).ok_or_else(|| invalid("expected tactic"))?;
+                if matches(&tx, dataset, &lookup)?
+                    .iter()
+                    .any(|item| item.target != basis.target)
+                {
+                    outcome = TacticPayoffPublication::ConflictingDefinition;
+                    "withheld"
+                } else {
+                    new_version = next.version.0.to_be_bytes();
+                    let payload = encode(next)?;
+                    tx.execute(
+                        "INSERT INTO content_history(ordinal,dataset_id,target_id,version,item)
+                         VALUES((SELECT coalesce(max(ordinal)+1,0) FROM content_history),?1,?2,?3,?4)",
+                        params![dataset.0,next.target.0,new_version.as_slice(),payload]
+                    ).map_err(database_error)?;
+                    tx.execute(
+                        "UPDATE current_content SET version=?1,item=?2 WHERE target_id=?3",
+                        params![new_version.as_slice(), payload, next.target.0],
+                    )
+                    .map_err(database_error)?;
+                    tx.execute(
+                        "DELETE FROM tactical_identities WHERE target_id=?1",
+                        [&next.target.0],
+                    )
+                    .map_err(database_error)?;
+                    index_item(&tx, next)?;
+                    tx.execute(
+                        "UPDATE tactical_requests SET version=?1 WHERE (dataset_id,target_id)=(?2,?3)
+                         AND attempt_id IS NULL AND fulfilled=0 AND cancelled=0",
+                        params![new_version.as_slice(),dataset.0,next.target.0],
+                    ).map_err(database_error)?;
+                    match next
+                        .definition
+                        .decisions
+                        .len()
+                        .cmp(&basis.definition.decisions.len())
+                    {
+                        std::cmp::Ordering::Less => "shortened",
+                        std::cmp::Ordering::Greater => "extended",
+                        std::cmp::Ordering::Equal if next.definition == basis.definition => "kept",
+                        std::cmp::Ordering::Equal => "revised",
+                    }
+                }
+            }
+        };
         tx.execute(
-            "UPDATE current_content SET version=?1,item=?2 WHERE target_id=?3",
-            params![version, payload, next.target.0],
+            "UPDATE tactical_qualifications SET version=?1,result=?2
+                    WHERE (dataset_id,target_id)=(?3,?4)",
+            params![new_version.as_slice(), result, dataset.0, basis.target.0],
         )
         .map_err(database_error)?;
-        tx.execute(
-            "DELETE FROM tactical_identities WHERE target_id=?1",
-            [&next.target.0],
-        )
-        .map_err(database_error)?;
-        index_item(&tx, next)?;
-        let revision = rev
+        let next_revision = rev
             .0
             .checked_add(1)
             .ok_or_else(|| invalid("store revision exhausted"))?;
-        tx.execute("UPDATE store_state SET revision=?1,content_revision=content_revision+1 WHERE singleton=1",[revision.to_be_bytes()]).map_err(database_error)?;
+        tx.execute("UPDATE store_state SET revision=?1,content_revision=content_revision+?2 WHERE singleton=1",
+            params![next_revision.to_be_bytes(),i32::from(new_version != version)],
+        ).map_err(database_error)?;
+        tx.execute(
+            "UPDATE tactical_report_generation SET evidence=evidence+1 WHERE singleton=1",
+            [],
+        )
+        .map_err(database_error)?;
         tx.commit().map_err(database_error)?;
-        Ok(TacticPayoffPublication::Published)
+        Ok(outcome)
     }
+}
+
+fn qualification_held(
+    connection: &Connection,
+    dataset: &DatasetId,
+    item: &ContentItem,
+) -> Result<bool, StoreError> {
+    let issued: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM store_state JOIN attempts ON attempts.id=active_attempt_id
+                       WHERE attempts.dataset_id=?1 AND attempts.target_id=?2)
+         OR EXISTS(SELECT 1 FROM tactical_requests
+                   WHERE dataset_id=?1 AND target_id=?2 AND fulfilled=0 AND cancelled=0 AND attempt_id IS NOT NULL)",
+         params![dataset.0,item.target.0], |row| row.get(0),
+    ).map_err(database_error)?;
+    Ok(issued
+        || learning(connection, &item.target)?.is_some_and(|state| {
+            state
+                .correction
+                .is_some_and(|c| c.answer_version == item.version)
+        }))
 }

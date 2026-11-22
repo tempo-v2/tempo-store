@@ -24,6 +24,8 @@ pub struct StudyState {
     pub suspended_repertoires: BTreeSet<String>,
     /// User exclusions for the targets covered by this read.
     pub excluded_tactics: BTreeSet<TargetId>,
+    /// Generated tactics awaiting proof or withheld from future issuance.
+    pub withheld_game_tactics: BTreeSet<TargetId>,
     pub active_attempt: Option<AttemptId>,
     pub repertoire_run: Option<crate::RepertoireRun>,
     pub attempts: BTreeMap<AttemptId, StoredAttempt>,
@@ -127,6 +129,7 @@ impl StudyState {
             policy: snapshot.policy.clone(),
             suspended_repertoires: BTreeSet::new(),
             excluded_tactics: BTreeSet::new(),
+            withheld_game_tactics: BTreeSet::new(),
             active_attempt: snapshot.active_attempt.clone(),
             repertoire_run: snapshot.repertoire_run.clone(),
             attempts,

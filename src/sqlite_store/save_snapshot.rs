@@ -168,6 +168,7 @@ fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<(), St
             )
             .map_err(database_error)?;
         super::tactical_targets::index_item(transaction, item)?;
+        super::tactical_targets::release_independent_tactic(transaction, &next.dataset, item)?;
     }
     for (ordinal, line) in next.catalog.lines.iter().enumerate() {
         transaction
