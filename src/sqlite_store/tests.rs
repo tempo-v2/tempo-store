@@ -127,6 +127,60 @@ fn schema_twenty_one_upgrades_with_its_active_attempt() {
 }
 
 #[test]
+fn schema_twenty_six_retires_report_writers_and_preserves_the_archive() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("schema-25.sqlite");
+    let mut store = create(&path, demo_catalog());
+    let before = issue(&mut store);
+    let count_report_triggers = |db: &Connection| -> usize {
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master
+             WHERE type='trigger' AND name GLOB 'tactical_report_*'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count_report_triggers(&store.connection), 0);
+
+    // Restore the report schema that an actual schema-25 database carries.
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE tactical_report_generation;
+             DROP INDEX tactical_report_comparisons;
+             DROP INDEX tactical_report_current_game;
+             DROP INDEX tactical_report_decisions;",
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "UPDATE tactical_report_generation SET evidence=413, archive=29;
+             PRAGMA user_version=25;",
+        )
+        .unwrap();
+    assert_eq!(count_report_triggers(&store.connection), 18);
+    let archived = store.tactical_report_generation(&before.dataset).unwrap();
+    drop(store);
+
+    let upgraded = SqliteStore::open(&path).unwrap();
+    assert_eq!(schema_version(&upgraded.connection).unwrap(), 26);
+    assert_eq!(count_report_triggers(&upgraded.connection), 0);
+    assert_eq!(
+        upgraded
+            .tactical_report_generation(&before.dataset)
+            .unwrap(),
+        archived,
+    );
+    assert_eq!(upgraded.snapshot().unwrap(), before);
+}
+
+#[test]
 fn simultaneous_writers_from_one_revision_have_one_winner() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");

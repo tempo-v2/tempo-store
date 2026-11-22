@@ -3,7 +3,7 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, DatasetIdentity, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
+    Commit, ContentReceipt, ContentSource, ContentState, DatasetIdentity, Receipt, ReceiptResult,
     RepertoireDocument, RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
     StudyState, Write,
 };
@@ -49,7 +49,7 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 const STUDY_PLAN_SCHEMA: &str = include_str!("sqlite_store/study_plan.sql");
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
@@ -62,6 +62,8 @@ const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
 const TACTICAL_REPORT_GENERATION_SCHEMA: &str =
     include_str!("sqlite_store/tactical_report_generation.sql");
+const RETIRE_TACTICAL_REPORT_GENERATION: &str =
+    include_str!("sqlite_store/retire_tactical_report_generation.sql");
 const REPERTOIRE_SUSPENSIONS_SCHEMA: &str = include_str!("sqlite_store/repertoire_suspensions.sql");
 const SAVED_REVIEWS_SCHEMA: &str = include_str!("sqlite_store/saved_reviews.sql");
 const TACTICAL_ANALYSIS_SCHEMA: &str = include_str!("sqlite_store/tactical_analysis.sql");
@@ -185,6 +187,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(RETIRE_TACTICAL_REPORT_GENERATION)
             .map_err(database_error)?;
         transaction
             .execute_batch(COVERAGE_SCHEMA)
@@ -522,6 +527,12 @@ impl SqliteStore {
             if schema_version(&tx)? == 24 {
                 study_plan::migrate_authority(&tx)?;
                 tx.pragma_update(None, "user_version", 25)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 25 {
+                tx.execute_batch(RETIRE_TACTICAL_REPORT_GENERATION)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 26)
                     .map_err(database_error)?;
             }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;

@@ -462,11 +462,6 @@ fn record_qualification_change(
         params![next_revision.to_be_bytes(), i32::from(content_changed)],
     )
     .map_err(database_error)?;
-    tx.execute(
-        "UPDATE tactical_report_generation SET evidence=evidence+1 WHERE singleton=1",
-        [],
-    )
-    .map_err(database_error)?;
     Ok(())
 }
 
