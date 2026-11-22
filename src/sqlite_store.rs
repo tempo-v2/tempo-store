@@ -1489,6 +1489,20 @@ impl Store for SqliteStore {
         ContentState::from_study(state, basis)
     }
 
+    fn local_profile(&self) -> Result<Option<String>, StoreError> {
+        SqliteStore::local_profile(self)
+    }
+
+    fn update_study_profile_for_plan(
+        &mut self,
+        dataset: &DatasetId,
+        expected: &str,
+        replacement: &str,
+        effect: StudyProfilePlanEffect,
+    ) -> Result<(), StoreError> {
+        SqliteStore::update_study_profile_for_plan(self, dataset, expected, replacement, effect)
+    }
+
     fn commit_study(
         &mut self,
         commit: Commit,

@@ -226,6 +226,22 @@ pub trait Store:
         Err(StoreError::Unsupported("tactical_observations"))
     }
 
+    /// Read the committed local Study profile.
+    fn local_profile(&self) -> Result<Option<String>, StoreError> {
+        Err(StoreError::Unsupported("local_profile"))
+    }
+
+    /// Save validated Settings through the same Store that owns Study writes.
+    fn update_study_profile_for_plan(
+        &mut self,
+        _dataset: &DatasetId,
+        _expected: &str,
+        _replacement: &str,
+        _effect: crate::StudyProfilePlanEffect,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("update_study_profile_for_plan"))
+    }
+
     /// Read a consistent owned view without changing stored state.
     fn snapshot(&self) -> Result<Snapshot, StoreError>;
     /// Read current study state with only the referenced outcome/receipt.
