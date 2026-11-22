@@ -173,6 +173,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        super::super::study_plan::remove_schema_for_prior_version_fixture(&store.connection);
         store
             .connection
             .pragma_update(None, "user_version", 22)
@@ -209,7 +210,7 @@ mod tests {
         let upgraded = SqliteStore::open(&path).unwrap();
         assert_eq!(
             super::super::schema_version(&upgraded.connection).unwrap(),
-            23
+            super::super::SCHEMA_VERSION
         );
         let snapshot = upgraded.snapshot().unwrap();
         let items = &snapshot.catalog.items;

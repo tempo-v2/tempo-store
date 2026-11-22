@@ -30,6 +30,10 @@ mod resume_read;
 mod row_values;
 mod save_snapshot;
 mod saved_reviews;
+mod study_plan;
+pub use study_plan::{
+    PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, StudyProjectionBasis,
+};
 mod study_content;
 mod tactic_policy;
 mod tactical_analysis;
@@ -43,7 +47,8 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
+const STUDY_PLAN_SCHEMA: &str = include_str!("sqlite_store/study_plan.sql");
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
     include_str!("sqlite_store/repertoire_partition_legacy.sql");
@@ -201,6 +206,7 @@ impl SqliteStore {
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
+        study_plan::initialize(&transaction)?;
         transaction
             .execute(
                 "UPDATE store_state SET local_profile=?1 WHERE singleton=1",
@@ -503,6 +509,11 @@ impl SqliteStore {
             if schema_version(&tx)? == 22 {
                 tactic_policy::migrate(&tx)?;
                 tx.pragma_update(None, "user_version", 23)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 23 {
+                study_plan::initialize(&tx)?;
+                tx.pragma_update(None, "user_version", 24)
                     .map_err(database_error)?;
             }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;

@@ -747,6 +747,7 @@ fn pending_keyset_sweep_covers_more_than_501_undated_games_and_records_empty_and
 }
 
 fn remove_v15_projection(store: &SqliteStore) {
+    super::super::study_plan::remove_schema_for_prior_version_fixture(&store.connection);
     let mut statement = store
         .connection
         .prepare(
@@ -1701,6 +1702,7 @@ fn capture_upgrade_invalidates_progress_and_keeps_issued_work() {
     let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
     issue_request(&mut store, &request, "old-capture");
     let mut expected = store.snapshot().unwrap();
+    super::super::study_plan::remove_schema_for_prior_version_fixture(&store.connection);
     store
         .connection
         .pragma_update(None, "user_version", 21)
@@ -1752,6 +1754,7 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
     let issued = issue_request(&mut store, &request, "old-version");
     game(&store, "two");
     accept(&mut store, &analysis("two", Some(&target)), &target);
+    super::super::study_plan::remove_schema_for_prior_version_fixture(&store.connection);
     // Start from the previously installed schema with both an active attempt
     // and another request waiting for its first issuance.
     store

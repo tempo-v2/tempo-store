@@ -81,6 +81,7 @@ fn schema_sixteen_opens_with_the_same_saved_results_and_no_repertoire_run() {
     let issued = issue(&mut store);
     commit(&mut store, &issued, successful_answer_writes(&issued)).unwrap();
     let before = store.snapshot().unwrap();
+    study_plan::remove_schema_for_prior_version_fixture(&store.connection);
     store
         .connection
         .execute_batch(
@@ -110,6 +111,7 @@ fn schema_twenty_one_upgrades_with_its_active_attempt() {
     let path = dir.path().join("study.sqlite");
     let mut store = create(&path, demo_catalog());
     let before = issue(&mut store);
+    study_plan::remove_schema_for_prior_version_fixture(&store.connection);
     store
         .connection
         .pragma_update(None, "user_version", 21)
