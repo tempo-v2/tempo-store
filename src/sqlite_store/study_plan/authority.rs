@@ -140,27 +140,27 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
     previous: &Snapshot,
     next: &Snapshot,
     submission: Option<&SubmissionId>,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let Some(submission) = submission.filter(|id| !previous.receipts.contains_key(*id)) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(ReceiptResult::Study(result)) =
         next.receipts.get(submission).map(|receipt| &receipt.result)
     else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(record) = next.attempts.get(&result.attempt.id) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(acceptance) = &record.acceptance else {
-        return Ok(());
+        return Ok(false);
     };
     if record.mode != ActivityMode::Teach
         || !record.first_introduction
         || record.attempt.status != AttemptStatus::Complete
         || acceptance.kind != AcceptanceKind::Teaching
     {
-        return Ok(());
+        return Ok(false);
     }
 
     let target = &record.attempt.target;
@@ -171,7 +171,7 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
         state.first_introduced == Some(day) && state.taught_at == Some(acceptance.at)
     });
     if !applied_first_teach {
-        return Ok(());
+        return Ok(false);
     }
 
     // The repertoire owner is indexed with the current content version and
@@ -193,10 +193,10 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
          WHERE dataset_id=?1 AND study_day=?2",
         params![next.dataset.0, day.0, i64::from(opening), i64::from(!opening)],
     ).map_err(database_error)?;
-    mark_acceptance_projections_dirty(tx, &next.dataset)
+    Ok(true)
 }
 
-pub(super) fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
+pub(in crate::sqlite_store) fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
     // There need not be any prepared generation or summary. If projection
     // state itself is missing, record a new dirty marker for this dataset.
     tx.execute(
@@ -207,33 +207,37 @@ pub(super) fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &
     invalidate_membership(tx, dataset)
 }
 
-/// Fence prepared projections when an addressed receipt commits a Learning
-/// change for an issued Test or Repair. An unchanged intermediate move or
-/// stale correction leaves compatible projections alone.
-pub(in crate::sqlite_store) fn record_prepared_learning_change(
+/// A scoped acceptance can change the active slot, the current correction,
+/// or the saved ordinary availability. Compare only facts the capture uses.
+pub(in crate::sqlite_store) fn acceptance_changes_basis(
     tx: &Transaction<'_>,
     previous: &Snapshot,
     next: &Snapshot,
     scope: StudyScope<'_>,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
+    if previous.active_attempt != next.active_attempt {
+        return Ok(true);
+    }
     let Some(submission) = scope.submission.filter(|id| !previous.receipts.contains_key(*id)) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(ReceiptResult::Study(result)) =
         next.receipts.get(submission).map(|receipt| &receipt.result)
     else {
-        return Ok(());
+        return Ok(false);
     };
-    let Some(issued) = previous.attempts.get(&result.attempt.id) else {
-        return Ok(());
-    };
-    if issued.issued_work.is_some()
-        && matches!(issued.mode, ActivityMode::Test | ActivityMode::Repair)
-        && previous.learning.get(&issued.attempt.target) != next.learning.get(&issued.attempt.target)
-    {
-        mark_acceptance_projections_dirty(tx, &next.dataset)?;
+    let target = &result.attempt.target;
+    let prior = previous.learning.get(target);
+    let current = next.learning.get(target);
+    if prior == current {
+        return Ok(false);
     }
-    Ok(())
+    let Some(day) = projection_state(tx, &next.dataset)?.and_then(|state| state.day) else {
+        return Ok(true);
+    };
+    let version = result.attempt.content_version;
+    Ok(prior.map(|state| (state.miss_revision, state.prepared_availability(version, day)))
+        != current.map(|state| (state.miss_revision, state.prepared_availability(version, day))))
 }
 
 /// Record a newly accepted Skip of an exact issued obligation. A later Skip of
@@ -293,7 +297,7 @@ pub(in crate::sqlite_store) fn record_issued_skip(
             ordinal,
         ],
     ).map_err(database_error)?;
-    mark_acceptance_projections_dirty(tx, &next.dataset)
+    Ok(())
 }
 
 pub(in crate::sqlite_store) fn migrate_authority(tx: &Transaction<'_>) -> Result<(), StoreError> {
@@ -682,4 +686,44 @@ mod tests {
             assert_eq!(authority(&store), migrated);
         }
     }
+
+    #[test]
+    fn accepted_legacy_test_fences_the_basis_once_and_keeps_its_receipt() {
+        use crate::{Commit, Write, test_support::successful_answer_writes};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut store, dataset) = create(&directory.path().join("study.sqlite"));
+        let initial = store.snapshot().unwrap();
+        let issued = issued_record(&initial);
+        let id = issued.attempt.id.clone();
+        store
+            .commit(Commit {
+                expected_dataset: dataset.clone(),
+                expected_revision: initial.revision,
+                writes: vec![Write::Issue(issued), Write::Active(Some(id.clone()))],
+            })
+            .unwrap();
+        let before = store.observe_study_day(&dataset, StudyDay(10)).unwrap().unwrap();
+        let scoped = store.snapshot().unwrap();
+        let command = "submission-1".into();
+        store
+            .commit_study(
+                Commit {
+                    expected_dataset: dataset.clone(),
+                    expected_revision: scoped.revision,
+                    writes: successful_answer_writes(&scoped),
+                },
+                StudyScope {
+                    attempt: Some(&id),
+                    submission: Some(&command),
+                    ..StudyScope::default()
+                },
+            )
+            .unwrap();
+        let after = store.study_projection_basis(&dataset).unwrap().unwrap();
+        assert_eq!(after.plan.membership_epoch.0, before.plan.membership_epoch.0 + 1);
+        assert_eq!(after.summary.epoch.0, before.summary.epoch.0 + 1);
+        assert!(after.summary_dirty);
+        assert!(store.snapshot().unwrap().receipts.contains_key(&command));
+    }
+
 }

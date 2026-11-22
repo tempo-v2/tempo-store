@@ -2,7 +2,7 @@
 
 mod authority;
 pub use authority::{StudyDayAuthority, StudyProfilePlanEffect};
-pub(super) use authority::{initialize_authority, migrate_authority, record_accepted_first_teach, record_issued_skip, record_prepared_learning_change};
+pub(super) use authority::{initialize_authority, migrate_authority, record_accepted_first_teach, record_issued_skip, acceptance_changes_basis, mark_acceptance_projections_dirty};
 
 mod resume_skipped;
 pub use resume_skipped::ResumeSkippedOutcome;

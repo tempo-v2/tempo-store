@@ -1882,10 +1882,14 @@ impl SqliteStore {
         let previous = load_study::staging_image(state);
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&transaction, Some(&previous), &next)?;
-        study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
-        study_plan::record_prepared_learning_change(&transaction, &previous, &next, scope)?;
+        let spent = study_plan::record_accepted_first_teach(
+            &transaction, &previous, &next, scope.submission,
+        )?;
         if let Some(day) = skip_day {
             study_plan::record_issued_skip(&transaction, &previous, &next, scope, day)?;
+        }
+        if spent || study_plan::acceptance_changes_basis(&transaction, &previous, &next, scope)? {
+            study_plan::mark_acceptance_projections_dirty(&transaction, &next.dataset)?;
         }
         crate::diagnostics::timed("sqlite.commit", || transaction.commit())
             .map_err(database_error)?;
