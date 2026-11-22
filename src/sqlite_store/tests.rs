@@ -105,6 +105,26 @@ fn schema_sixteen_opens_with_the_same_saved_results_and_no_repertoire_run() {
 }
 
 #[test]
+fn schema_twenty_one_upgrades_with_its_active_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("study.sqlite");
+    let mut store = create(&path, demo_catalog());
+    let before = issue(&mut store);
+    store
+        .connection
+        .pragma_update(None, "user_version", 21)
+        .unwrap();
+    drop(store);
+
+    let upgraded = SqliteStore::open(&path).unwrap();
+    assert_eq!(
+        schema_version(&upgraded.connection).unwrap(),
+        SCHEMA_VERSION
+    );
+    assert_eq!(upgraded.snapshot().unwrap(), before);
+}
+
+#[test]
 fn simultaneous_writers_from_one_revision_have_one_winner() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("study.sqlite");
