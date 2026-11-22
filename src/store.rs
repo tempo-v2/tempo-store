@@ -90,7 +90,9 @@ pub trait DatasetIdentity {
 /// [`crate::MemoryStore`] implements the contract in process memory.
 /// [`crate::SqliteStore`] uses the same validation and publishes each batch
 /// inside one database transaction.
-pub trait Store: DatasetIdentity + crate::AddressedResume + crate::StudyContentRead {
+pub trait Store:
+    DatasetIdentity + crate::AddressedResume + crate::StudyContentRead + crate::StudyReceiptRead
+{
     /// The latest applied human Test grade on the addressed answer version.
     /// Unknown includes imported learning without corresponding local history.
     fn latest_applied_test(

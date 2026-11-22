@@ -28,6 +28,21 @@ pub struct Receipt {
     pub result: ReceiptResult,
 }
 
+/// Read an accepted command before loading any new-work facts.
+pub trait StudyReceiptRead {
+    fn study_receipt(
+        &self,
+        dataset: &DatasetId,
+        id: &SubmissionId,
+    ) -> Result<StudyReceiptLookup, crate::StoreError>;
+}
+
+pub enum StudyReceiptLookup {
+    WrongDataset,
+    Missing,
+    Found(Box<Receipt>),
+}
+
 impl Receipt {
     /// Identifies the exact delivery receipt owned by an external assessment key.
     pub fn external_id(dataset: &DatasetId, provider: &str, event: &EventId) -> SubmissionId {

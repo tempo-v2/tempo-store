@@ -134,6 +134,23 @@ impl crate::StudyContentRead for MemoryStore {
     }
 }
 
+impl crate::StudyReceiptRead for MemoryStore {
+    fn study_receipt(
+        &self,
+        dataset: &DatasetId,
+        id: &tempo_types::SubmissionId,
+    ) -> Result<crate::StudyReceiptLookup, StoreError> {
+        use crate::StudyReceiptLookup;
+        if dataset != &self.state.dataset {
+            return Ok(StudyReceiptLookup::WrongDataset);
+        }
+        Ok(self.state.receipts.get(id).cloned().map_or(
+            StudyReceiptLookup::Missing,
+            |receipt| StudyReceiptLookup::Found(Box::new(receipt)),
+        ))
+    }
+}
+
 impl Store for MemoryStore {
     fn latest_applied_test(
         &self,

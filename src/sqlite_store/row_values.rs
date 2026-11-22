@@ -364,3 +364,36 @@ mod tests {
         }
     }
 }
+
+impl crate::StudyReceiptRead for super::SqliteStore {
+    fn study_receipt(
+        &self,
+        dataset: &tempo_types::DatasetId,
+        id: &tempo_types::SubmissionId,
+    ) -> Result<crate::StudyReceiptLookup, StoreError> {
+        use crate::{Receipt, StudyReceiptLookup};
+        let (active_dataset, command, encoded): (String, Option<String>, Option<String>) = self
+            .connection
+            .query_row(
+                "SELECT s.dataset_id, r.command, r.result
+                 FROM store_state s
+                 LEFT JOIN receipts r ON r.id=?2 AND s.dataset_id=?1
+                 WHERE s.singleton=1",
+                rusqlite::params![dataset.0, id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(database_error)?;
+        if active_dataset != dataset.0 {
+            return Ok(StudyReceiptLookup::WrongDataset);
+        }
+        match (command, encoded) {
+            (Some(command), Some(encoded)) => Ok(StudyReceiptLookup::Found(Box::new(Receipt {
+                id: id.clone(),
+                command,
+                result: decode_receipt(&encoded)?,
+            }))),
+            (None, None) => Ok(StudyReceiptLookup::Missing),
+            _ => Err(invalid("incomplete Study receipt row")),
+        }
+    }
+}

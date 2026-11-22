@@ -43,7 +43,7 @@ pub use chess_attempt::ChessAttempt;
 pub use commit::Commit;
 pub use content_history::ContentHistory;
 pub use memory_store::MemoryStore;
-pub use receipt::Receipt;
+pub use receipt::{Receipt, StudyReceiptLookup, StudyReceiptRead};
 pub use resume_state::{AddressedResume, ResumeState, ResumeTarget};
 pub use receipt_result::ReceiptResult;
 pub use repertoire_activity::{
