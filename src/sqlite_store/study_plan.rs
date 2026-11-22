@@ -83,14 +83,51 @@ pub(super) fn initialize(transaction: &Transaction<'_>) -> Result<(), StoreError
 }
 
 impl SqliteStore {
-    /// Record the day observed by the runtime's Study calendar before an operation
-    /// captures or uses projections. A retired dataset cannot change this basis.
-    pub fn observe_study_day(
+    /// Publish a civil day calculated by the runtime calendar. The dataset
+    /// and the persisted timezone must still match the inputs used to
+    /// calculate it. A mismatch leaves projection/day authority untouched.
+    pub fn observe_study_calendar_day(
+        &mut self,
+        dataset: &DatasetId,
+        timezone: &str,
+        day: StudyDay,
+    ) -> Result<Option<StudyProjectionBasis>, StoreError> {
+        self.observe_day(dataset, Some(timezone), day)
+    }
+
+    #[cfg(test)]
+    fn observe_study_day(
         &mut self,
         dataset: &DatasetId,
         day: StudyDay,
     ) -> Result<Option<StudyProjectionBasis>, StoreError> {
+        self.observe_day(dataset, None, day)
+    }
+
+    fn observe_day(
+        &mut self,
+        dataset: &DatasetId,
+        timezone: Option<&str>,
+        day: StudyDay,
+    ) -> Result<Option<StudyProjectionBasis>, StoreError> {
         let transaction = self.plan_write()?;
+        if let Some(timezone) = timezone {
+            let current: bool = transaction.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM store_state
+                   WHERE singleton=1 AND dataset_id=?1
+                     AND CASE WHEN json_valid(local_profile)
+                         THEN json_type(local_profile,'$.study_timezone')='text'
+                           AND json_extract(local_profile,'$.study_timezone')=?2
+                         ELSE 0 END
+                 )",
+                params![dataset.0, timezone],
+                |row| row.get(0),
+            ).map_err(database_error)?;
+            if !current {
+                return Ok(None);
+            }
+        }
         let Some(mut state) = projection_state(&transaction, dataset)? else {
             return Ok(None);
         };
