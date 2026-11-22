@@ -2,7 +2,7 @@
 
 use super::{next_epoch, projection_state, store_count};
 use crate::{
-    AcceptanceKind, ActivityMode, ReceiptResult, StoreError, StoredAttempt,
+    AcceptanceKind, ActivityMode, ReceiptResult, Snapshot, StoreError, StoredAttempt,
     sqlite_store::{
         SqliteStore, database_error,
         row_values::{decode, receipt_value},
@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use tempo_learning::LearningState;
 use tempo_study::AttemptStatus;
-use tempo_types::{ContentVersion, DatasetId, StudyDay};
+use tempo_types::{ContentVersion, DatasetId, StudyDay, SubmissionId};
 
 const SCHEMA: &str = include_str!("../study_day_authority.sql");
 
@@ -130,6 +130,77 @@ fn invalidate_membership(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<()
     )
     .map_err(database_error)?;
     Ok(())
+}
+
+/// Record only a newly accepted first introduction. The scoped commit already
+/// validated the receipt, issued attempt and Learning transition. This effect
+/// writes the acceptance day's authority and fences disposable projections.
+pub(in crate::sqlite_store) fn record_accepted_first_teach(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+    submission: Option<&SubmissionId>,
+) -> Result<(), StoreError> {
+    let Some(submission) = submission.filter(|id| !previous.receipts.contains_key(*id)) else {
+        return Ok(());
+    };
+    let Some(ReceiptResult::Study(result)) =
+        next.receipts.get(submission).map(|receipt| &receipt.result)
+    else {
+        return Ok(());
+    };
+    let Some(record) = next.attempts.get(&result.attempt.id) else {
+        return Ok(());
+    };
+    let Some(acceptance) = &record.acceptance else {
+        return Ok(());
+    };
+    if record.mode != ActivityMode::Teach
+        || !record.first_introduction
+        || record.attempt.status != AttemptStatus::Complete
+        || acceptance.kind != AcceptanceKind::Teaching
+    {
+        return Ok(());
+    }
+
+    let target = &record.attempt.target;
+    let day = acceptance.at.day;
+    let applied_first_teach = previous.learning.get(target).is_some_and(|state| {
+        state.first_introduced.is_none()
+    }) && next.learning.get(target).is_some_and(|state| {
+        state.first_introduced == Some(day) && state.taught_at == Some(acceptance.at)
+    });
+    if !applied_first_teach {
+        return Ok(());
+    }
+
+    // The repertoire owner is indexed with the current content version and
+    // supplies the authoritative opening/tactics distinction.
+    let opening: bool = tx.query_row(
+        "SELECT repertoire IS NOT NULL FROM current_content
+         WHERE dataset_id=?1 AND target_id=?2 AND version=?3",
+        params![
+            next.dataset.0,
+            target.0,
+            record.attempt.content_version.0.to_be_bytes().as_slice(),
+        ],
+        |row| row.get(0),
+    ).map_err(database_error)?;
+    ensure_day(tx, &next.dataset, day)?;
+    tx.execute(
+        "UPDATE study_day_authority
+         SET opening_spent=opening_spent+?3,tactic_spent=tactic_spent+?4
+         WHERE dataset_id=?1 AND study_day=?2",
+        params![next.dataset.0, day.0, i64::from(opening), i64::from(!opening)],
+    ).map_err(database_error)?;
+    // A missing projection state is recreated dirty. Plan and summary heads
+    // are never read by this acceptance path.
+    tx.execute(
+        "INSERT INTO study_projection_state(dataset_id) VALUES (?1)
+         ON CONFLICT(dataset_id) DO NOTHING",
+        [&next.dataset.0],
+    ).map_err(database_error)?;
+    invalidate_membership(tx, &next.dataset)
 }
 
 pub(in crate::sqlite_store) fn migrate_authority(tx: &Transaction<'_>) -> Result<(), StoreError> {

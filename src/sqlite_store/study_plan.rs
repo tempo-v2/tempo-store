@@ -2,7 +2,7 @@
 
 mod authority;
 pub use authority::{StudyDayAuthority, StudyProfilePlanEffect};
-pub(super) use authority::{initialize_authority, migrate_authority};
+pub(super) use authority::{initialize_authority, migrate_authority, record_accepted_first_teach};
 
 mod capture;
 pub use capture::{StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts};

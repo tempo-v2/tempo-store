@@ -1521,6 +1521,7 @@ impl Store for SqliteStore {
         let previous = load_study::staging_image(state);
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&transaction, Some(&previous), &next)?;
+        study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
         crate::diagnostics::timed("sqlite.commit", || transaction.commit())
             .map_err(database_error)?;
         Ok(next.revision)
