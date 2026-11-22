@@ -61,7 +61,7 @@ pub use sqlite_store::{
 };
 pub use store::{
     ContentReceipt, ContentSource, DatasetIdentity, RepertoireDocument, RepertoirePartition,
-    RepertoireReset, Store,
+    PriorRepertoireReset, Store,
     StudyOrderingWrite, StudyScope,
 };
 pub use store_error::StoreError;

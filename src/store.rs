@@ -2,7 +2,6 @@
 
 use crate::{Commit, ContentState, Receipt, Snapshot, StoreError, StoredAttempt, StudyState};
 use tempo_chess::ContentItem;
-use tempo_learning::LearningState;
 use tempo_types::{
     AttemptId, ContentVersion, DatasetId, Grade, Revision, StudyDay, SubmissionId, TargetId,
 };
@@ -64,12 +63,12 @@ pub struct RepertoireDocument {
     pub source_id: Option<String>,
 }
 
-/// The same command may be delivered again without changing newer learning.
-pub enum RepertoireReset {
-    Applied(Vec<TargetId>),
+/// Read-only settlement of a reset from an earlier release.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PriorRepertoireReset {
     Replayed,
+    NotAccepted,
     StaleDataset,
-    UnknownRepertoire,
     CommandConflict,
 }
 
@@ -359,16 +358,14 @@ pub trait Store:
         Err(StoreError::Unsupported("set_repertoire_activity"))
     }
 
-    /// Clear one repertoire's Study records and publish its reset receipt atomically.
-    fn reset_repertoire(
-        &mut self,
+    /// Resolve the immutable identity of a previously accepted repertoire reset.
+    fn accepted_repertoire_reset(
+        &self,
         _dataset: &DatasetId,
         _repertoire: &str,
         _command_id: &str,
-        _at_ms: u64,
-        _fresh: &LearningState,
-    ) -> Result<RepertoireReset, StoreError> {
-        Err(StoreError::Unsupported("reset_repertoire"))
+    ) -> Result<PriorRepertoireReset, StoreError> {
+        Err(StoreError::Unsupported("accepted_repertoire_reset"))
     }
 
     /// Latest reset whose evidence boundary applies to this repertoire.

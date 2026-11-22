@@ -180,7 +180,10 @@ fn schema_twenty_six_retires_report_writers_and_preserves_the_archive() {
     drop(store);
 
     let upgraded = SqliteStore::open(&path).unwrap();
-    assert_eq!(schema_version(&upgraded.connection).unwrap(), SCHEMA_VERSION);
+    assert_eq!(
+        schema_version(&upgraded.connection).unwrap(),
+        SCHEMA_VERSION
+    );
     assert_eq!(count_report_triggers(&upgraded.connection), 0);
     assert_eq!(
         upgraded
@@ -225,49 +228,68 @@ fn simultaneous_writers_from_one_revision_have_one_winner() {
 }
 
 #[test]
-fn repertoire_reset_rolls_back_scoped_deletions_when_its_receipt_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reset.sqlite");
-    let mut store = create(&path, demo_catalog());
+fn retired_repertoire_reset_reads_only_the_exact_receipt_and_preserves_boundaries() {
+    use rusqlite::hooks::AuthAction;
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = create(&directory.path().join("reset.sqlite"), demo_catalog());
     let issued = issue(&mut store);
     store
         .connection
         .execute_batch(
-            "CREATE TRIGGER reject_reset_receipt BEFORE INSERT ON repertoire_resets
-         BEGIN SELECT RAISE(ABORT, 'injected reset failure'); END;",
+            "INSERT INTO repertoire_resets VALUES
+            ('reset-one','dataset-a','r1',100),
+            ('reset-two','dataset-a','r1',200);",
         )
         .unwrap();
-    let fresh = LearningState::default();
-    assert!(
-        store
-            .reset_repertoire(&issued.dataset, "r1", "reset-one", 100, &fresh)
-            .is_err()
+    let ((), access) = operation_probe::probe_access(
+        &mut store,
+        |action| match action {
+            AuthAction::Read {
+                table_name,
+                column_name,
+            } => {
+                !matches!(table_name, "store_state" | "repertoire_resets")
+                    || column_name == "reset_at_ms"
+            }
+            AuthAction::Insert { .. } | AuthAction::Update { .. } | AuthAction::Delete { .. } => {
+                true
+            }
+            _ => false,
+        },
+        |store| {
+            use PriorRepertoireReset::*;
+            assert_eq!(
+                store
+                    .accepted_repertoire_reset(&issued.dataset, "r1", "reset-one")
+                    .unwrap(),
+                Replayed
+            );
+            assert_eq!(
+                store
+                    .accepted_repertoire_reset(&issued.dataset, "r2", "reset-one")
+                    .unwrap(),
+                CommandConflict
+            );
+            assert_eq!(
+                store
+                    .accepted_repertoire_reset(&issued.dataset, "r1", "new")
+                    .unwrap(),
+                NotAccepted
+            );
+            assert_eq!(
+                store
+                    .accepted_repertoire_reset(&"old-dataset".into(), "r1", "reset-one")
+                    .unwrap(),
+                StaleDataset
+            );
+        },
     );
+    assert!(access.denied.is_empty());
     assert_eq!(store.snapshot().unwrap(), issued);
     assert_eq!(
         store.repertoire_reset_at(&issued.dataset, "r1").unwrap(),
-        None
+        Some(200)
     );
-
-    store
-        .connection
-        .execute_batch("DROP TRIGGER reject_reset_receipt")
-        .unwrap();
-    assert!(matches!(
-        store
-            .reset_repertoire(&issued.dataset, "r1", "reset-one", 100, &fresh)
-            .unwrap(),
-        RepertoireReset::Applied(_)
-    ));
-    let reset = store.snapshot().unwrap();
-    assert!(reset.active_attempt.is_none());
-    assert!(reset.attempts.is_empty());
-    assert_eq!(reset.learning, issued.learning);
-    assert!(matches!(
-        commit(&mut store, &issued, successful_answer_writes(&issued)),
-        Err(StoreError::Conflict(_))
-    ));
-    assert_eq!(store.snapshot().unwrap(), reset);
 }
 
 #[test]

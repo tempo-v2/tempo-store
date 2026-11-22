@@ -4,7 +4,7 @@ use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
     Commit, ContentReceipt, ContentSource, ContentState, DatasetIdentity, Receipt, ReceiptResult,
-    RepertoireDocument, RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
+    PriorRepertoireReset, RepertoireDocument, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
     StudyState, Write,
 };
 use rusqlite::{
@@ -816,24 +816,13 @@ impl Store for SqliteStore {
     ) -> Result<crate::TacticalObservationPage, StoreError> {
         tactical_analysis::observations(&self.connection, dataset, detector, version, before, limit)
     }
-    fn reset_repertoire(
-        &mut self,
+    fn accepted_repertoire_reset(
+        &self,
         dataset: &DatasetId,
         repertoire: &str,
         command_id: &str,
-        at_ms: u64,
-        fresh: &LearningState,
-    ) -> Result<RepertoireReset, StoreError> {
-        let _diagnostic =
-            crate::diagnostics::Operation::new("sqlite.sqlite_store.reset_repertoire");
-        repertoire_resets::apply(
-            &mut self.connection,
-            dataset,
-            repertoire,
-            command_id,
-            at_ms,
-            fresh,
-        )
+    ) -> Result<PriorRepertoireReset, StoreError> {
+        repertoire_resets::accepted(&self.connection, dataset, repertoire, command_id)
     }
 
     fn repertoire_reset_at(
