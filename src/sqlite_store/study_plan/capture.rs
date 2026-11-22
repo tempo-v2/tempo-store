@@ -1,19 +1,21 @@
 //! Read one original planning basis and its compact facts in the same snapshot.
 
-use super::{StudyDayAuthority, StudyProjectionBasis, authority, projection_state};
+use super::{StudyDayAuthority, StudyProjectionBasis, authority, projection_state, sqlite_count};
 use crate::sqlite_store::{
     SqliteStore, database_error,
     load_snapshot::load_lines,
-    row_values::{decode, read_selected},
+    row_values::{decode, decode_counter, read_selected},
     study_content::{STUDY_CONTENT_FACT_COLUMNS, read_content_facts},
 };
 use crate::{StoreError, StudyContentFacts, store_error::invalid};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 use std::{collections::BTreeSet, sync::LazyLock};
 use tempo_chess::RepertoireLine;
 use tempo_learning::{DailyAvailability, LearningState};
-use tempo_types::{DatasetId, MissRevision};
+use tempo_types::{
+    ContentVersion, DatasetId, DeferredWork, MissRevision, StudyDay, TargetId, WorkObligation,
+};
 
 /// Whether a coherent original basis is available for the batch builder.
 ///
@@ -32,6 +34,9 @@ pub struct StudyPlanInputFacts {
     pub basis: StudyProjectionBasis,
     pub profile: Option<StudyProfileFacts>,
     pub day_authority: Option<StudyDayAuthority>,
+    /// Exact deferrals above the committed cutoff, in acceptance order.
+    /// Missing day authority and a proved empty set are distinct.
+    pub effective_deferrals: Option<Vec<DeferredWork>>,
     pub expected_targets: usize,
     pub targets: Vec<StudyPlanTargetFacts>,
     /// Authored routes in durable order with no PGN or playable definitions.
@@ -115,14 +120,52 @@ fn capture_inputs(
     if targets.len() != expected_targets {
         return Err(invalid("incomplete captured Study targets"));
     }
+    let day_authority = authority::read_day(tx, &basis.plan.dataset, day)?;
+    let effective_deferrals = day_authority
+        .as_ref()
+        .map(|authority| capture_deferrals(tx, dataset, day, authority))
+        .transpose()?;
     Ok(StudyPlanInputFacts {
         profile: capture_profile(tx, dataset)?,
-        day_authority: authority::read_day(tx, &basis.plan.dataset, basis.plan.day)?,
+        day_authority,
+        effective_deferrals,
         basis,
         expected_targets,
         targets,
         routes: load_lines(tx)?,
     })
+}
+
+fn capture_deferrals(
+    tx: &Transaction<'_>,
+    dataset: &str,
+    day: StudyDay,
+    authority: &StudyDayAuthority,
+) -> Result<Vec<DeferredWork>, StoreError> {
+    let latest = sqlite_count(authority.latest_skip)?;
+    read_selected(
+        tx,
+        "SELECT target_id, version, json_quote(work_kind), obligation_revision, ordinal
+         FROM study_deferrals
+         WHERE dataset_id=?1 AND study_day=?2 AND ordinal>?3 ORDER BY ordinal",
+        params![dataset, day.0, sqlite_count(authority.skip_cutoff)?],
+        |row| {
+            if row.get::<_, i64>(4).map_err(database_error)? > latest {
+                return Err(invalid(
+                    "stored Study deferral exceeds its accepted frontier",
+                ));
+            }
+            Ok(DeferredWork {
+                day,
+                obligation: WorkObligation {
+                    target: TargetId(row.get(0).map_err(database_error)?),
+                    version: ContentVersion(decode_counter(row.get(1).map_err(database_error)?)?),
+                    kind: decode(&row.get::<_, String>(2).map_err(database_error)?)?,
+                    revision: MissRevision(decode_counter(row.get(3).map_err(database_error)?)?),
+                },
+            })
+        },
+    )
 }
 
 fn capture_profile(
@@ -195,7 +238,6 @@ mod tests {
     use rusqlite::{
         Connection,
         hooks::{AuthAction, AuthContext, Authorization},
-        params,
     };
     use std::{
         path::Path,
@@ -208,7 +250,7 @@ mod tests {
     };
     use tempo_chess::{ContentStatus, demo_catalog};
     use tempo_learning::{DailyLearning, LearningPolicy};
-    use tempo_types::{MembershipEpoch, StudyDay, StudyTime, TargetId};
+    use tempo_types::{MembershipEpoch, StudyTime, WorkKind};
 
     const DAY: StudyDay = StudyDay(10);
 
@@ -269,6 +311,7 @@ mod tests {
                     "store_state"
                         | "study_projection_state"
                         | "study_day_authority"
+                        | "study_deferrals"
                         | "current_content"
                         | "learning"
                         | "repertoire_lines"
@@ -289,6 +332,7 @@ mod tests {
         assert!(access.denied.is_empty(), "{:?}", access.denied);
         assert_eq!(captured.basis, basis);
         assert_eq!(captured.profile, None);
+        assert_eq!(captured.effective_deferrals, Some(vec![]));
         assert_eq!(captured.expected_targets, 3);
         assert_eq!(captured.targets.len(), 3);
         assert_eq!(captured.routes.len(), 1);
@@ -398,6 +442,89 @@ mod tests {
                 Err(StoreError::Invalid(_))
             ));
         }
+    }
+
+    #[test]
+    fn plan_capture_carries_only_current_day_exact_deferrals_above_cutoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut store, dataset) = fixture(&directory.path().join("study.sqlite"));
+        let next_day = StudyDay(DAY.0 + 1);
+        store.observe_study_day(&dataset, DAY).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO datasets(id) VALUES('other-dataset');
+             INSERT INTO study_day_authority(dataset_id,study_day,latest_skip)
+             VALUES('other-dataset',10,1),('capture-dataset',11,1);
+             UPDATE study_day_authority SET latest_skip=4,skip_cutoff=1
+             WHERE dataset_id='capture-dataset' AND study_day=10;",
+            )
+            .unwrap();
+        let add = |dataset: &str,
+                   day: StudyDay,
+                   version: u64,
+                   kind: &str,
+                   revision: u64,
+                   ordinal: i64| {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO study_deferrals VALUES(?1,?2,'t1',?3,?4,?5,?6)",
+                    params![
+                        dataset,
+                        day.0,
+                        version.to_be_bytes().as_slice(),
+                        kind,
+                        revision.to_be_bytes().as_slice(),
+                        ordinal
+                    ],
+                )
+                .unwrap();
+        };
+        add(&dataset.0, DAY, 1, "test", 3, 1); // Already resumed.
+        add(&dataset.0, DAY, 1, "test", 4, 2);
+        add(&dataset.0, DAY, 2, "test", 4, 3);
+        add(&dataset.0, DAY, 2, "correction", 4, 4);
+        add(&dataset.0, next_day, 3, "teach", 2, 1);
+        add("other-dataset", DAY, 4, "teach", 3, 1);
+        let captured = incomplete(store.capture_study_plan(&dataset).unwrap());
+        let exact = |day, version, kind, revision| DeferredWork {
+            day,
+            obligation: WorkObligation {
+                target: TargetId::from("t1"),
+                version: ContentVersion(version),
+                kind,
+                revision: MissRevision(revision),
+            },
+        };
+        assert_eq!(
+            captured.effective_deferrals,
+            Some(vec![
+                exact(DAY, 1, WorkKind::Test, 4),
+                exact(DAY, 2, WorkKind::Test, 4),
+                exact(DAY, 2, WorkKind::Correction, 4),
+            ])
+        );
+        store.observe_study_day(&dataset, next_day).unwrap();
+        let captured = incomplete(store.capture_study_plan(&dataset).unwrap());
+        assert_eq!(
+            captured.effective_deferrals,
+            Some(vec![exact(next_day, 3, WorkKind::Teach, 2)])
+        );
+        store
+            .observe_study_day(&dataset, StudyDay(DAY.0 + 2))
+            .unwrap();
+        let captured = incomplete(store.capture_study_plan(&dataset).unwrap());
+        assert_eq!(captured.effective_deferrals, Some(vec![]));
+        store
+            .connection
+            .execute(
+                "DELETE FROM study_day_authority WHERE study_day=?1",
+                [DAY.0 + 2],
+            )
+            .unwrap();
+        let captured = incomplete(store.capture_study_plan(&dataset).unwrap());
+        assert_eq!(captured.effective_deferrals, None);
     }
 
     #[test]
