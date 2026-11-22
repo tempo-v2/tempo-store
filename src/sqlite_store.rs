@@ -29,6 +29,7 @@ mod repertoire_suspensions;
 mod row_values;
 mod save_snapshot;
 mod saved_reviews;
+mod tactic_policy;
 mod tactical_analysis;
 mod tactical_targets;
 pub use tactical_targets::TacticPayoffPublication;
@@ -40,7 +41,7 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
     include_str!("sqlite_store/repertoire_partition_legacy.sql");
@@ -494,7 +495,12 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 21 {
                 tactical_targets::withhold_ambiguous_captures(&tx)?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                tx.pragma_update(None, "user_version", 22)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 22 {
+                tactic_policy::migrate(&tx)?;
+                tx.pragma_update(None, "user_version", 23)
                     .map_err(database_error)?;
             }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
