@@ -529,6 +529,18 @@ impl SqliteStore {
         game_relevance::comparison_marker(&self.connection)
     }
 
+    /// Read the current dataset and actual SQLite schema together for application context.
+    pub fn context_identity(&self) -> Result<(DatasetId, i64), StoreError> {
+        self.connection
+            .query_row(
+                "SELECT dataset_id, user_version FROM store_state, pragma_user_version() \
+                 WHERE singleton=1",
+                [],
+                |row| Ok((DatasetId(row.get(0)?), row.get(1)?)),
+            )
+            .map_err(database_error)
+    }
+
     /// Read desired books, source associations and active target facts at one revision.
     pub fn projection_books(
         &self,
@@ -1813,6 +1825,11 @@ mod dataset_identity_tests {
             |store| store.dataset_id(),
         );
         assert_eq!(result.unwrap(), DatasetId("identity-only".into()));
+        assert_eq!(
+            store.context_identity().unwrap(),
+            (DatasetId("identity-only".into()), SCHEMA_VERSION)
+        );
+
         assert!(access.denied.is_empty());
         assert!(!access.allowed.is_empty());
 
@@ -1821,5 +1838,6 @@ mod dataset_identity_tests {
             .execute("DELETE FROM store_state", [])
             .unwrap();
         assert!(store.dataset_id().is_err());
+        assert!(store.context_identity().is_err());
     }
 }
