@@ -770,6 +770,8 @@ fn remove_v15_projection(store: &SqliteStore) {
             "DROP INDEX last_applied_human_test;
          DROP TABLE repertoire_run_steps;
          DROP VIEW tactical_report_requests;
+         DROP VIEW withheld_game_tactics;
+         DROP TABLE tactical_qualifications;
          DROP TABLE study_exclusions;
          DROP INDEX tactical_requests_card_origin;
          DROP TABLE repertoire_coverage_gaps;
@@ -1640,9 +1642,10 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
     let target = plan.target;
     let prior = plan.content.catalog.items[&target].clone();
     let pv = ["d1h5", "g7g6", "h5c5", "g8f6"].map(str::to_owned);
-    let extension = tempo_chess::extend_generated_tactic(&prior, &pv)
-        .unwrap()
-        .unwrap();
+    let qualification = tempo_chess::requalify_game_tactic(&prior, &pv).unwrap();
+    let tempo_chess::GameTacticQualification::Revised(extension) = &qualification else {
+        panic!("expected a verified fork");
+    };
     let dataset: DatasetId = "dataset".into();
     let mut store = SqliteStore::create(
         &path,
@@ -1654,12 +1657,48 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
     game(&store, "one");
     accept(&mut store, &analysis("one", Some(&target)), &target);
     let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
-    let publish =
-        |s: &SqliteStore| s.publish_tactic_payoff(&dataset, request.id as i64, &extension);
-    assert_eq!(publish(&store).unwrap(), Deferred);
-    assert!(store.tactic_payoff_held(&dataset, &prior).unwrap());
     let issued = issue_request(&mut store, &request, "old-version");
+    game(&store, "two");
+    accept(&mut store, &analysis("two", Some(&target)), &target);
+    // Start from the previously installed schema with both an active attempt
+    // and another request waiting for its first issuance.
+    store
+        .connection
+        .execute_batch(
+            "DROP VIEW tactical_report_requests;
+         DROP VIEW withheld_game_tactics;
+         DROP TABLE tactical_qualifications;",
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            include_str!("../study_exclusions.sql")
+                .split_once("CREATE VIEW tactical_report_requests")
+                .map(|(_, view)| {
+                    format!("CREATE VIEW tactical_report_requests{view} PRAGMA user_version=18;")
+                })
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+    drop(store);
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert!(
+        store
+            .pending_tactical_requests(&dataset)
+            .unwrap()
+            .is_empty()
+    );
+    let publish = |s: &SqliteStore| {
+        s.publish_game_tactic_qualification(&dataset, &prior, qualification.clone())
+    };
     assert_eq!(publish(&store).unwrap(), Deferred);
+    assert!(
+        store
+            .game_tactic_qualification_held(&dataset, &prior)
+            .unwrap()
+    );
     let result = tempo_study::submit(
         &ExactSequenceGrader,
         &prior.definition,
@@ -1700,7 +1739,11 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
             },
         )
         .unwrap();
-    assert!(!store.tactic_payoff_held(&dataset, &prior).unwrap());
+    assert!(
+        !store
+            .game_tactic_qualification_held(&dataset, &prior)
+            .unwrap()
+    );
     let before = store.snapshot().unwrap();
     store.connection.execute_batch("CREATE TRIGGER fail_payoff BEFORE UPDATE ON current_content BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
     assert!(publish(&store).is_err());
@@ -1715,6 +1758,9 @@ fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
     assert_eq!(publish(&store).unwrap(), Obsolete);
     let after = store.snapshot().unwrap();
     assert_eq!(after.catalog.items[&target], *extension.replacement());
+    let queued = store.pending_tactical_requests(&dataset).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].version, extension.replacement().version);
     assert_eq!(after.learning, before.learning);
     assert_eq!(after.receipts, before.receipts);
     assert_eq!(after.attempts, before.attempts);

@@ -273,6 +273,7 @@ pub struct TacticalDecisionRow {
     pub outcome: tempo_chess::TacticalOutcome,
     pub candidates: Vec<(tempo_chess::Motif, String)>,
     pub accepted: Vec<String>,
+    pub recognition: Option<tempo_chess::TacticRecognition>,
 }
 
 /// The currently reportable Study link for a turn, independent of its latest evaluation.

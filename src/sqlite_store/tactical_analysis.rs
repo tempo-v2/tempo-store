@@ -533,6 +533,7 @@ pub(super) fn pending_requests(
         FROM tactical_requests r JOIN current_content c ON
             (c.dataset_id,c.target_id,c.version)=(r.dataset_id,r.target_id,r.version)
         WHERE r.dataset_id=?1 AND r.fulfilled=0 AND r.cancelled=0 AND r.attempt_id IS NULL
+        AND NOT EXISTS(SELECT 1 FROM withheld_game_tactics w WHERE (w.dataset_id,w.target_id)=(r.dataset_id,r.target_id))
         ORDER BY r.id DESC",
         )
         .map_err(database_error)?;
@@ -582,6 +583,18 @@ pub(super) fn issue_daily(
     let state = load_study::load_study(&tx, scope)?;
     if state.active_attempt.is_some() {
         return Err(conflict("finish the active attempt before daily issuance"));
+    }
+    if state.withheld_game_tactics.contains(&record.attempt.target)
+        && !state
+            .target(&record.attempt.target)?
+            .is_some_and(|(item, learning)| {
+                learning
+                    .correction
+                    .as_ref()
+                    .is_some_and(|c| c.answer_version == item.version)
+            })
+    {
+        return Err(conflict("generated tactic still needs a verified payoff"));
     }
     let previous = load_study::staging_image(state);
     let next = stage_commit(&previous, commit)?;
@@ -1231,7 +1244,8 @@ impl SqliteStore {
                (SELECT json_group_array(json_array(json_extract(value,'$.motif'),json_extract(value,'$.answer.uci')))
                 FROM json_each(details_json,'$.assessment.personal.candidates')),
                (SELECT json_group_array(json_extract(value,'$.uci'))
-                FROM json_each(details_json,'$.assessment.accepted_moves')), o.learner
+                FROM json_each(details_json,'$.assessment.accepted_moves')), o.learner,
+               json_extract(details_json,'$.recognition')
              FROM tactical_observations o
              JOIN latest l ON (l.source,l.game_id)=(o.source,o.game_id)
              JOIN game_comparisons c ON c.ordinal=l.ordinal
@@ -1256,6 +1270,12 @@ impl SqliteStore {
                 outcome: decode(&format!("\"{outcome}\""))?,
                 candidates: decode(&row.get::<_, String>(6).map_err(database_error)?)?,
                 accepted: decode(&row.get::<_, String>(7).map_err(database_error)?)?,
+                recognition: row
+                    .get::<_, Option<String>>(9)
+                    .map_err(database_error)?
+                    .as_deref()
+                    .map(decode)
+                    .transpose()?,
             });
         }
         Ok(decisions)
@@ -1443,4 +1463,51 @@ fn stored_binding(
         })
     })
     .transpose()
+}
+
+impl SqliteStore {
+    /// Reuse accepted all-root game evidence and fetch a bounded page for
+    /// recognition verification. The PGN and publication receipt are stable.
+    pub fn pending_tactic_recognition(
+        &self,
+        dataset: &DatasetId,
+        version: &str,
+        before: i64,
+    ) -> Result<Vec<(i64, String)>, StoreError> {
+        let mut query = self.connection.prepare_cached(
+            "SELECT o.id,o.details_json FROM tactical_observations o
+             WHERE o.dataset_id=?1 AND o.analysis_version=?2 AND o.motif=?3
+               AND o.current=1 AND o.id<?4
+               AND json_extract(o.details_json,'$.recognition') IS NULL
+               AND EXISTS(
+                   SELECT 1 FROM json_each(o.details_json,'$.assessment.personal.candidates') candidate
+                   JOIN json_each(o.details_json,'$.assessment.accepted_moves') accepted
+                     ON json_extract(candidate.value,'$.answer.uci')=json_extract(accepted.value,'$.uci')
+               )
+             ORDER BY o.id DESC LIMIT 1",
+        ).map_err(database_error)?;
+        query
+            .query_map(
+                params![dataset.0, version, PERSONAL_DECISION_KIND, before],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn publish_tactic_recognition(
+        &self,
+        dataset: &DatasetId,
+        id: i64,
+        evidence: &str,
+        recognition: &tempo_chess::TacticRecognition,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE tactical_observations SET details_json=json_set(details_json,'$.recognition',json(?1))
+             WHERE dataset_id=?2 AND id=?3 AND current=1 AND details_json=?4",
+            params![encode(recognition)?,dataset.0,id,evidence],
+        ).map_err(database_error)?;
+        Ok(())
+    }
 }
