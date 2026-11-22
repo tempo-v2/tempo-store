@@ -4,6 +4,11 @@ mod authority;
 pub use authority::{StudyDayAuthority, StudyProfilePlanEffect};
 pub(super) use authority::{initialize_authority, migrate_authority, record_accepted_first_teach, record_issued_skip, acceptance_changes_basis, mark_acceptance_projections_dirty};
 
+mod issue;
+mod ready;
+pub use issue::PreparedStudyIssue;
+pub use ready::{PreparedStudyCandidate, PreparedStudyNext};
+
 mod resume_skipped;
 pub use resume_skipped::ResumeSkippedOutcome;
 
@@ -15,7 +20,7 @@ pub use capture::{
 
 use super::{
     STUDY_PLAN_SCHEMA, SqliteStore, database_error,
-    row_values::{decode_counter, read_selected},
+    row_values::decode_counter,
 };
 use crate::{StoreError, store_error::invalid};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -27,12 +32,8 @@ use tempo_types::{
 
 /// One metadata update fits beside a full chunk in the 128-row write budget.
 pub const PLAN_ENTRY_CHUNK: usize = 127;
-const CANDIDATE_LIMIT: i64 = 32;
-const READY_PLAN_SQL: &str = "SELECT target_id,version,work_kind,obligation_revision,
-                    priority_class,due_day,ordinal
-             FROM study_plan_entries WHERE generation=?1 AND state='ready'
-             ORDER BY priority_class,due_day,ordinal,target_id,version,work_kind,obligation_revision
-             LIMIT ?2";
+#[cfg(test)]
+use ready::READY_PLAN_SQL;
 const RECLAIM_PLAN_SQL: &str = "DELETE FROM study_plan_entries WHERE rowid IN (
                     SELECT rowid FROM study_plan_entries WHERE generation=?1
                     ORDER BY target_id,version,work_kind,obligation_revision LIMIT ?2
@@ -326,45 +327,6 @@ impl SqliteStore {
     /// Read the single published head. Staged and reclaiming rows are invisible.
     pub fn study_plan_head(&self, dataset: &DatasetId) -> Result<Option<PlanHead>, StoreError> {
         published_head(&self.connection, dataset)
-    }
-
-    /// Read at most 32 ordered candidate rows from the named compatible head.
-    /// `None` means there is no usable matching head. An empty vector means the
-    /// index has no ready rows under that head; caller still owns validity.
-    pub fn ready_study_plan_entries(
-        &self,
-        dataset: &DatasetId,
-        generation: PlanGeneration,
-        today: StudyDay,
-    ) -> Result<Option<Vec<PlanEntry>>, StoreError> {
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
-                .map_err(database_error)?;
-        let id = sqlite_count(generation.0)?;
-        let usable: bool = transaction
-            .query_row(
-                "SELECT EXISTS(
-               SELECT 1 FROM store_state s JOIN study_projection_state p USING(dataset_id)
-               JOIN study_plan_generations g
-                 ON (g.dataset_id,g.generation)=(p.dataset_id,p.head_generation)
-               WHERE s.singleton=1 AND s.dataset_id=?1 AND g.generation=?2 AND g.phase='published'
-                 AND p.study_day=?3 AND g.study_day=?3 AND p.membership_epoch=g.membership_epoch
-             )",
-                params![dataset.0, id, today.0],
-                |row| row.get(0),
-            )
-            .map_err(database_error)?;
-        if !usable {
-            return Ok(None);
-        }
-        let rows = read_selected(
-            &transaction,
-            READY_PLAN_SQL,
-            params![id, CANDIDATE_LIMIT],
-            |row| read_ready_row(row, today),
-        )?;
-        transaction.commit().map_err(database_error)?;
-        Ok(Some(rows))
     }
 
     /// Reclaim a superseded or explicitly abandoned generation in short turns.

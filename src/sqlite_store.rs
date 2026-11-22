@@ -33,6 +33,7 @@ mod saved_reviews;
 mod study_plan;
 pub use study_plan::{
     ActiveStudyWork, PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult,
+    PreparedStudyCandidate, PreparedStudyIssue, PreparedStudyNext,
     ResumeSkippedOutcome, StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts,
     StudyPlanTargetFacts, StudyProfileFacts,
     StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
