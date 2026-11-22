@@ -62,7 +62,6 @@ pub struct RepertoireDocument {
     pub item: Option<ContentItem>,
     pub pgn: Option<String>,
     pub source_id: Option<String>,
-    pub model_authority: crate::ModelAuthority,
 }
 
 /// The same command may be delivered again without changing newer learning.
@@ -708,22 +707,6 @@ pub trait Store:
         _dataset: &DatasetId,
     ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
         Err(StoreError::Unsupported("game_model_projection_status"))
-    }
-
-    fn model_bootstrap_repertoires(&self, _dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
-        Err(StoreError::Unsupported("model_bootstrap_repertoires"))
-    }
-
-    /// Accept one legacy source verification only while the original source is current.
-    fn finish_model_bootstrap(
-        &mut self,
-        _dataset: &DatasetId,
-        _content_revision: Revision,
-        _repertoire: &str,
-        _source_id: &str,
-        _stamp: Option<&crate::ModelInputStamp>,
-    ) -> Result<(), StoreError> {
-        Err(StoreError::Unsupported("finish_model_bootstrap"))
     }
 
     /// Page through the newest comparison for each game and learner at a fixed

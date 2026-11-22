@@ -180,7 +180,7 @@ fn schema_twenty_six_retires_report_writers_and_preserves_the_archive() {
     drop(store);
 
     let upgraded = SqliteStore::open(&path).unwrap();
-    assert_eq!(schema_version(&upgraded.connection).unwrap(), 26);
+    assert_eq!(schema_version(&upgraded.connection).unwrap(), SCHEMA_VERSION);
     assert_eq!(count_report_triggers(&upgraded.connection), 0);
     assert_eq!(
         upgraded
@@ -647,6 +647,20 @@ fn current_document_source_catalog_learning_and_receipt_roll_back_together() {
         store.content_receipt("request").unwrap().as_deref(),
         Some("{}")
     );
+    store.connection.execute(
+        "UPDATE game_model_inputs SET state='unavailable',input_key=NULL WHERE repertoire_id=?1",
+        [repertoire],
+    ).unwrap();
+    assert_eq!(
+        store.repertoire_document(repertoire).unwrap().pgn.as_deref(),
+        Some("1. e4 *"),
+    );
+    store.connection.execute(
+        "DELETE FROM authored_source_pairings WHERE repertoire_id=?1",
+        [repertoire],
+    ).unwrap();
+    assert_eq!(store.repertoire_document(repertoire).unwrap().pgn, None);
+
 }
 
 #[test]

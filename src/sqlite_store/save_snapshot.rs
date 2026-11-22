@@ -29,6 +29,9 @@ pub(super) fn save_snapshot_with_admission_effect(
     let mut admission_gate_changed = false;
     if replace_catalog {
         if let Some(old) = previous.filter(|old| old.dataset == next.dataset) {
+            super::authored_source_pairings::invalidate_changed(
+                transaction, &next.dataset, &old.catalog, &next.catalog,
+            )?;
             super::game_model::catalog_changed(
                 transaction,
                 &next.dataset,

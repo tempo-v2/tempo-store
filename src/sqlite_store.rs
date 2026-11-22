@@ -15,6 +15,7 @@ use tempo_chess::{Catalog, ContentItem, LeadInEvidence};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Grade, Revision, StudyDay, TargetId};
 
+mod authored_source_pairings;
 mod game_choices;
 mod game_evidence;
 mod game_model;
@@ -51,7 +52,7 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 const STUDY_PLAN_SCHEMA: &str = include_str!("sqlite_store/study_plan.sql");
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
@@ -153,6 +154,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(REPERTOIRE_DOCUMENT_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(authored_source_pairings::SCHEMA)
             .map_err(database_error)?;
         transaction
             .execute_batch(GAME_EVIDENCE_SCHEMA)
@@ -536,6 +540,10 @@ impl SqliteStore {
                     .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", 26)
                     .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 26 {
+                authored_source_pairings::migrate(&tx)?;
+                tx.pragma_update(None, "user_version", 27).map_err(database_error)?;
             }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         }
@@ -1280,32 +1288,6 @@ impl Store for SqliteStore {
         game_model::status(&self.connection, dataset).map(Some)
     }
 
-    fn model_bootstrap_repertoires(&self, dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
-        let _diagnostic =
-            crate::diagnostics::Operation::new("sqlite.sqlite_store.model_bootstrap_repertoires");
-        game_model::bootstrap_repertoires(&self.connection, dataset)
-    }
-
-    fn finish_model_bootstrap(
-        &mut self,
-        dataset: &DatasetId,
-        content_revision: Revision,
-        repertoire: &str,
-        source_id: &str,
-        stamp: Option<&crate::ModelInputStamp>,
-    ) -> Result<(), StoreError> {
-        let _diagnostic =
-            crate::diagnostics::Operation::new("sqlite.sqlite_store.finish_model_bootstrap");
-        game_model::finish_bootstrap(
-            &mut self.connection,
-            dataset,
-            content_revision,
-            repertoire,
-            source_id,
-            stamp,
-        )
-    }
-
     fn game_library(
         &self,
         dataset: &DatasetId,
@@ -1537,26 +1519,26 @@ impl Store for SqliteStore {
     fn repertoire_document(&self, id: &str) -> Result<RepertoireDocument, StoreError> {
         let _diagnostic =
             crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_document");
-        let (dataset, revision, item, pgn, source_id, authority, suspended):
-            (_, u64, Option<String>, Option<String>, _, Option<String>, bool) = self.connection
+        let (dataset, revision, item, pgn, source_id, suspended):
+            (_, u64, Option<String>, Option<String>, _, bool) = self.connection
             .query_row(
                 "SELECT state.dataset_id, state.content_revision,
                         (SELECT item FROM current_content
                          WHERE dataset_id=state.dataset_id AND repertoire=?1 ORDER BY target_id LIMIT 1),
-                        CASE WHEN input.state='unavailable' THEN NULL ELSE source.pgn END,
-                        document.source_id,input.state,
+                        CASE WHEN pairing.source_id=document.source_id THEN source.pgn END,
+                        document.source_id,
                         EXISTS(SELECT 1 FROM repertoire_suspensions
                             WHERE dataset_id=state.dataset_id AND repertoire_id=?1)
                  FROM store_state AS state
                  LEFT JOIN repertoire_documents AS document
                     ON document.dataset_id=state.dataset_id AND document.repertoire_id=?1
                  LEFT JOIN content_sources AS source ON source.id=document.source_id
-                 LEFT JOIN game_model_inputs AS input
-                    ON (input.dataset_id,input.repertoire_id)=(document.dataset_id,document.repertoire_id)
+                 LEFT JOIN authored_source_pairings AS pairing
+                    ON (pairing.dataset_id,pairing.repertoire_id)=(document.dataset_id,document.repertoire_id)
                  WHERE state.singleton=1",
                 [id],
                 |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?)),
+                    row.get(4)?, row.get(5)?)),
             )
             .map_err(database_error)?;
         Ok(RepertoireDocument {
@@ -1566,11 +1548,6 @@ impl Store for SqliteStore {
             item: item.as_deref().map(row_values::decode).transpose()?,
             pgn,
             source_id,
-            model_authority: match authority.as_deref() {
-                Some("needs_bootstrap") => crate::ModelAuthority::NeedsBootstrap,
-                Some("verified") => crate::ModelAuthority::Verified,
-                _ => crate::ModelAuthority::Unavailable,
-            },
         })
     }
 
@@ -1765,7 +1742,10 @@ impl SqliteStore {
                 ).map_err(database_error)? != 0;
                 let verified =
                     game_model::set_verified(&transaction, &dataset, repertoire, model_input)?;
-                if (changed || verified) && !catalog_changed {
+                let paired = authored_source_pairings::record(
+                    &transaction, &dataset, repertoire, id,
+                )?;
+                if (changed || verified || paired) && !catalog_changed {
                     if no_writes_with_receipt {
                         revision = Revision(
                             revision

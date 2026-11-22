@@ -38,14 +38,6 @@ pub fn model_lines<'a>(catalog: &'a Catalog, id: &str) -> BTreeSet<(&'a str, &'a
         .collect()
 }
 
-/// The archived source can still be read after modeling authority was revoked.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ModelAuthority {
-    NeedsBootstrap,
-    Verified,
-    Unavailable,
-}
-
 pub struct ProjectionBook {
     pub repertoire_id: String,
     pub pgn: String,

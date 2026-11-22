@@ -77,7 +77,7 @@ pub use write::Write;
 
 mod game_model;
 pub use game_model::{
-    BookProjection, ModelAuthority, ModelInputStamp, ModelTargets, ProjectionBook, ProjectionScope,
+    BookProjection, ModelInputStamp, ModelTargets, ProjectionBook, ProjectionScope,
     ProjectionStatus, REACH_MODEL_KEY, model_lines, model_targets,
 };
 mod game_evidence;

@@ -7,7 +7,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tempo_chess::{Catalog, ContentItem};
-use tempo_types::{DatasetId, Revision};
+use tempo_types::DatasetId;
 
 pub(super) fn catalog_changed(
     tx: &Transaction<'_>,
@@ -71,57 +71,6 @@ pub(super) fn set_verified(
         params![dataset.0, repertoire, stamp.key],
     ).map_err(database_error)?;
     Ok(changed != 0)
-}
-
-pub(super) fn bootstrap_repertoires(
-    db: &Connection,
-    dataset: &DatasetId,
-) -> Result<Vec<String>, StoreError> {
-    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.bootstrap_repertoires");
-    row_values::read_selected(
-        db,
-        "SELECT repertoire_id FROM game_model_inputs AS input WHERE dataset_id=?1 AND state='needs_bootstrap'
-           AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions AS suspended
-               WHERE (suspended.dataset_id,suspended.repertoire_id)=(input.dataset_id,input.repertoire_id))
-         ORDER BY repertoire_id",
-        [&dataset.0],
-        |row| row.get(0).map_err(database_error),
-    )
-}
-
-pub(super) fn finish_bootstrap(
-    db: &mut Connection,
-    dataset: &DatasetId,
-    revision: Revision,
-    repertoire: &str,
-    source_id: &str,
-    stamp: Option<&ModelInputStamp>,
-) -> Result<(), StoreError> {
-    let _diagnostic = crate::diagnostics::Operation::new("sqlite.game_model.finish_bootstrap");
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(database_error)?;
-    game_relevance::check_dataset(&tx, dataset)?;
-    game_relevance::check_content_revision(&tx, revision)?;
-    let current: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM game_model_inputs JOIN repertoire_documents USING(dataset_id,repertoire_id)
-         WHERE dataset_id=?1 AND repertoire_id=?2 AND state='needs_bootstrap' AND source_id=?3)",
-        params![dataset.0, repertoire, source_id], |row| row.get(0),
-    ).map_err(database_error)?;
-    if !current {
-        return Err(conflict(
-            "the legacy model source changed during verification",
-        ));
-    }
-    if let Some(stamp) = stamp {
-        set_verified(&tx, dataset, repertoire, stamp)?;
-    } else {
-        tx.execute(
-            "UPDATE game_model_inputs SET state='unavailable' WHERE dataset_id=?1 AND repertoire_id=?2",
-            params![dataset.0, repertoire],
-        ).map_err(database_error)?;
-    }
-    crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)
 }
 
 pub(super) fn books(
