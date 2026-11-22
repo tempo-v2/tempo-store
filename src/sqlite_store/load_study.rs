@@ -1,7 +1,7 @@
 //! Read live study facts and indexed rows for the current command.
 use super::database_error;
 use super::load_snapshot::load_lines;
-use super::row_values::{decode, decode_counter, read_selected, text_value};
+use super::row_values::{decode, decode_counter, read_selected, receipt_value, text_value};
 use crate::{Receipt, Snapshot, StoreError, StoredAttempt, StudyScope, StudyState, TargetCoverage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +100,7 @@ pub(super) fn load_study(
                     Receipt {
                         id: id.clone(),
                         command: row.get(0).map_err(database_error)?,
-                        result: text_value(row, 1)?,
+                        result: receipt_value(row, 1)?,
                     },
                 ))
             },

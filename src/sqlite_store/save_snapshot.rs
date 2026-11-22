@@ -1,7 +1,7 @@
 //! Persist the validated snapshot inside the caller's open write transaction.
 
 use super::database_error;
-use super::row_values::{encode, row_index};
+use super::row_values::{encode, encode_receipt, row_index};
 use crate::{AssessmentKey, ReceiptResult, Snapshot, StoreError};
 use rusqlite::{Transaction, params};
 use tempo_chess::ContentKind;
@@ -232,7 +232,7 @@ fn save_outcomes(
             transaction
                 .execute(
                     "INSERT INTO receipts VALUES (?1, ?2, ?3, ?4)",
-                    params![id.0, attempt, receipt.command, encode(&receipt.result)?],
+                    params![id.0, attempt, receipt.command, encode_receipt(&receipt.result)?],
                 )
                 .map_err(database_error)?;
         }

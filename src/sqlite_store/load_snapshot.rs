@@ -1,7 +1,7 @@
 //! Assemble a typed Store snapshot from all tables in one read transaction.
 
 use super::database_error;
-use super::row_values::{decode, decode_counter, read_rows, text_value};
+use super::row_values::{decode, decode_counter, read_rows, receipt_value, text_value};
 use crate::{ContentHistory, Receipt, Snapshot, StoreError};
 use rusqlite::Transaction;
 use std::collections::BTreeMap;
@@ -69,7 +69,7 @@ pub(super) fn load_snapshot(transaction: &Transaction<'_>) -> Result<Snapshot, S
                 let receipt = Receipt {
                     id: tempo_types::SubmissionId(row.get(0).map_err(database_error)?),
                     command: row.get(1).map_err(database_error)?,
-                    result: text_value(row, 2)?,
+                    result: receipt_value(row, 2)?,
                 };
                 Ok((receipt.id.clone(), receipt))
             },
