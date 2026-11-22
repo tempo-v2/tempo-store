@@ -1504,27 +1504,16 @@ impl Store for SqliteStore {
         commit: Commit,
         scope: StudyScope<'_>,
     ) -> Result<Revision, StoreError> {
-        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_study");
-        if commit
-            .writes
-            .iter()
-            .any(|write| matches!(write, Write::Catalog(_) | Write::Restore { .. }))
-        {
-            return Err(invalid("content writes require a content transaction"));
-        }
-        let transaction = crate::diagnostics::timed("sqlite.begin", || {
-            self.connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-        })
-        .map_err(database_error)?;
-        let state = load_study::load_study(&transaction, scope)?;
-        let previous = load_study::staging_image(state);
-        let next = stage_commit(&previous, commit)?;
-        save_snapshot(&transaction, Some(&previous), &next)?;
-        study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
-        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
-            .map_err(database_error)?;
-        Ok(next.revision)
+        self.commit_study_transaction(commit, scope, None)
+    }
+
+    fn commit_issued_skip(
+        &mut self,
+        commit: Commit,
+        scope: StudyScope<'_>,
+        day: StudyDay,
+    ) -> Result<Revision, StoreError> {
+        self.commit_study_transaction(commit, scope, Some(day))
     }
 
     fn commit(&mut self, commit: Commit) -> Result<Revision, StoreError> {
@@ -1786,6 +1775,40 @@ impl SqliteStore {
         crate::diagnostics::timed("sqlite.commit", || transaction.commit())
             .map_err(database_error)?;
         Ok(revision)
+    }
+}
+
+impl SqliteStore {
+    fn commit_study_transaction(
+        &mut self,
+        commit: Commit,
+        scope: StudyScope<'_>,
+        skip_day: Option<StudyDay>,
+    ) -> Result<Revision, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_study");
+        if commit
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Catalog(_) | Write::Restore { .. }))
+        {
+            return Err(invalid("content writes require a content transaction"));
+        }
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
+        let state = load_study::load_study(&transaction, scope)?;
+        let previous = load_study::staging_image(state);
+        let next = stage_commit(&previous, commit)?;
+        save_snapshot(&transaction, Some(&previous), &next)?;
+        study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
+        if let Some(day) = skip_day {
+            study_plan::record_issued_skip(&transaction, &previous, &next, scope, day)?;
+        }
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
+        Ok(next.revision)
     }
 }
 

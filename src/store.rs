@@ -244,6 +244,17 @@ pub trait Store:
         self.commit(commit)
     }
 
+    /// Commit an addressed Skip and its exact acceptance-day deferral together.
+    /// The attempt's persisted issued identity supplies the obligation.
+    fn commit_issued_skip(
+        &mut self,
+        _commit: Commit,
+        _scope: StudyScope<'_>,
+        _day: StudyDay,
+    ) -> Result<Revision, StoreError> {
+        Err(StoreError::Unsupported("commit_issued_skip"))
+    }
+
     /// Read up to 31 saved positions in reverse insertion order, before an optional cursor.
     fn saved_review_page(
         &self,

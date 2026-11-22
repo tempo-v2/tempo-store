@@ -1,13 +1,13 @@
 //! Day-local Study authority and the transactional Settings fence.
 
-use super::{next_epoch, projection_state, store_count};
+use super::{next_epoch, projection_state, store_count, work_kind_value};
 use crate::{
-    AcceptanceKind, ActivityMode, ReceiptResult, Snapshot, StoreError, StoredAttempt,
+    AcceptanceKind, ActivityMode, ReceiptResult, Snapshot, StoreError, StoredAttempt, StudyScope,
     sqlite_store::{
         SqliteStore, database_error,
         row_values::{decode, receipt_value},
     },
-    store_error::conflict,
+    store_error::{conflict, invalid},
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -193,14 +193,78 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
          WHERE dataset_id=?1 AND study_day=?2",
         params![next.dataset.0, day.0, i64::from(opening), i64::from(!opening)],
     ).map_err(database_error)?;
-    // A missing projection state is recreated dirty. Plan and summary heads
-    // are never read by this acceptance path.
+    mark_acceptance_projections_dirty(tx, &next.dataset)
+}
+
+fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
+    // There need not be any prepared generation or summary. If projection
+    // state itself is missing, record a new dirty marker for this dataset.
     tx.execute(
         "INSERT INTO study_projection_state(dataset_id) VALUES (?1)
          ON CONFLICT(dataset_id) DO NOTHING",
-        [&next.dataset.0],
+        [&dataset.0],
     ).map_err(database_error)?;
-    invalidate_membership(tx, &next.dataset)
+    invalidate_membership(tx, dataset)
+}
+
+/// Record a newly accepted Skip of an exact issued obligation. A later Skip of
+/// the same obligation after Resume Skipped receives a newer day-local ordinal.
+pub(in crate::sqlite_store) fn record_issued_skip(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+    scope: StudyScope<'_>,
+    day: StudyDay,
+) -> Result<(), StoreError> {
+    let record = scope.attempt
+        .filter(|id| previous.active_attempt.as_ref() == Some(*id))
+        .and_then(|id| previous.attempts.get(id))
+        .ok_or_else(|| invalid("Skip must address the active attempt"))?;
+    let work = record.issued_work.as_ref()
+        .ok_or_else(|| invalid("Skip requires an exact issued obligation"))?;
+    let result = scope.submission
+        .filter(|id| !previous.receipts.contains_key(*id))
+        .and_then(|id| next.receipts.get(id))
+        .and_then(|receipt| match &receipt.result {
+            ReceiptResult::Study(result) => Some(result),
+            _ => None,
+        })
+        .ok_or_else(|| invalid("Skip requires its exact new Study receipt"))?;
+    if result.attempt.id != record.attempt.id
+        || result.attempt.status != AttemptStatus::Abandoned
+        || result.assessment.is_some()
+        || result.learning_effect.is_some()
+        || next.active_attempt.is_some()
+        || previous.learning != next.learning
+    {
+        return Err(invalid("Skip cannot grade or replace the active attempt"));
+    }
+
+    ensure_day(tx, &next.dataset, day)?;
+    let ordinal: i64 = tx.query_row(
+        "UPDATE study_day_authority SET latest_skip=latest_skip+1
+         WHERE dataset_id=?1 AND study_day=?2 RETURNING latest_skip",
+        params![next.dataset.0, day.0],
+        |row| row.get(0),
+    ).map_err(database_error)?;
+    let obligation = &work.obligation;
+    tx.execute(
+        "INSERT INTO study_deferrals
+           (dataset_id,study_day,target_id,version,work_kind,obligation_revision,ordinal)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(dataset_id,study_day,target_id,version,work_kind,obligation_revision)
+         DO UPDATE SET ordinal=excluded.ordinal",
+        params![
+            next.dataset.0,
+            day.0,
+            obligation.target.0,
+            obligation.version.0.to_be_bytes().as_slice(),
+            work_kind_value(obligation.kind),
+            obligation.revision.0.to_be_bytes().as_slice(),
+            ordinal,
+        ],
+    ).map_err(database_error)?;
+    mark_acceptance_projections_dirty(tx, &next.dataset)
 }
 
 pub(in crate::sqlite_store) fn migrate_authority(tx: &Transaction<'_>) -> Result<(), StoreError> {
