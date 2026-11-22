@@ -32,6 +32,7 @@ pub enum StudyPlanCapture {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StudyPlanInputFacts {
     pub basis: StudyProjectionBasis,
+    /// Absent when the persisted policy is missing or cannot be decoded.
     pub profile: Option<StudyProfileFacts>,
     pub day_authority: Option<StudyDayAuthority>,
     /// Exact deferrals above the committed cutoff, in acceptance order.
@@ -58,7 +59,7 @@ pub struct StudyProfileFacts {
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StudyThemeSelection {
-    Any,
+    Any {},
     Selected { theme_ids: BTreeSet<String> },
 }
 
@@ -173,14 +174,14 @@ fn capture_profile(
     dataset: &str,
 ) -> Result<Option<StudyProfileFacts>, StoreError> {
     const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-    let Some((timezone, openings, tactics, themes)) = tx
+    let row = tx
         .query_row(
             "SELECT local_profile -> '$.study_timezone',
                     local_profile -> '$.introductions.repertoire',
                     local_profile -> '$.introductions.tactics',
                     local_profile -> '$.tactic_themes'
              FROM store_state
-             WHERE singleton=1 AND dataset_id=?1 AND local_profile IS NOT NULL",
+             WHERE singleton=1 AND dataset_id=?1 AND json_valid(local_profile)",
             [dataset],
             |row| {
                 Ok((
@@ -192,40 +193,30 @@ fn capture_profile(
             },
         )
         .optional()
-        .map_err(database_error)?
-    else {
-        return Ok(None);
+        .map_err(database_error)?;
+
+    let limit = |field: Option<String>| {
+        serde_json::from_str::<u64>(field.as_deref()?)
+            .ok()
+            .filter(|value| *value <= MAX_SAFE_INTEGER)
     };
-    let timezone: String = serde_json::from_str(required_profile_field(timezone.as_deref())?)
-        .map_err(|_| invalid("invalid captured Study time zone"))?;
-    let limit = |field: Option<String>| -> Result<u64, StoreError> {
-        let value = serde_json::from_str::<u64>(required_profile_field(field.as_deref())?)
-            .map_err(|_| invalid("invalid captured Study introduction limit"))?;
-        if value > MAX_SAFE_INTEGER {
-            return Err(invalid("invalid captured Study introduction limit"));
+    Ok(row.and_then(|(timezone, openings, tactics, themes)| {
+        let timezone: String = serde_json::from_str(timezone.as_deref()?).ok()?;
+        if timezone.is_empty() {
+            return None;
         }
-        Ok(value)
-    };
-    let tactic_themes = match themes.as_deref() {
-        // Older installed profiles omit this optional field.
-        None | Some("null") => StudyThemeSelection::Any,
-        Some(selection) => serde_json::from_str(selection)
-            .map_err(|_| invalid("invalid captured Study theme selection"))?,
-    };
-    if timezone.is_empty() {
-        return Err(invalid("invalid captured Study time zone"));
-    }
-
-    Ok(Some(StudyProfileFacts {
-        timezone,
-        opening_limit: limit(openings)?,
-        tactic_limit: limit(tactics)?,
-        tactic_themes,
+        let tactic_themes = match themes.as_deref() {
+            // Older installed profiles omit this optional field.
+            None | Some("null") => StudyThemeSelection::Any {},
+            Some(selection) => serde_json::from_str(selection).ok()?,
+        };
+        Some(StudyProfileFacts {
+            timezone,
+            opening_limit: limit(openings)?,
+            tactic_limit: limit(tactics)?,
+            tactic_themes,
+        })
     }))
-}
-
-fn required_profile_field(field: Option<&str>) -> Result<&str, StoreError> {
-    field.ok_or_else(|| invalid("missing required captured Study profile field"))
 }
 
 #[cfg(test)]
@@ -367,7 +358,7 @@ mod tests {
                 timezone: "America/Chicago".into(),
                 opening_limit: 2,
                 tactic_limit: 4,
-                tactic_themes: StudyThemeSelection::Any,
+                tactic_themes: StudyThemeSelection::Any {},
             })
         );
         let normalized = r#"{
@@ -421,6 +412,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (mut store, dataset) = fixture(&directory.path().join("study.sqlite"));
         store.observe_study_day(&dataset, DAY).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE store_state SET local_profile='bad whole profile' WHERE singleton=1",
+                [],
+            )
+            .unwrap();
+        let unavailable = incomplete(store.capture_study_plan(&dataset).unwrap());
+        assert_eq!(unavailable.profile, None);
         for (path, json) in [
             ("$.introductions.repertoire", "null"),
             ("$.introductions.repertoire", "true"),
@@ -437,10 +437,8 @@ mod tests {
                     params![PROFILE, path, json],
                 )
                 .unwrap();
-            assert!(matches!(
-                store.capture_study_plan(&dataset),
-                Err(StoreError::Invalid(_))
-            ));
+            let unavailable = incomplete(store.capture_study_plan(&dataset).unwrap());
+            assert_eq!(unavailable.profile, None, "failed to reject {path}: {json}");
         }
     }
 
