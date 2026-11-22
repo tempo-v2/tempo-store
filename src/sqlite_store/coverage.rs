@@ -47,18 +47,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         game_relevance::check_dataset(&tx, dataset)?;
         game_relevance::check_content_revision(&tx, content_revision)?;
-        let available: bool = tx.query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM game_model_inputs AS input WHERE dataset_id=?1 AND repertoire_id=?2
-                AND state='verified'
-                AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions
-                                WHERE dataset_id=input.dataset_id AND repertoire_id=input.repertoire_id)
-            )",
-            params![dataset.0, repertoire], |row| row.get(0),
-        ).map_err(database_error)?;
-        if !available {
-            return Err(StoreError::StaleCoverage);
-        }
+        check_coverage_repertoire(&tx, dataset, repertoire)?;
         let prior = starting_line(&tx, dataset, repertoire)?;
         if prior.moves == moves {
             return Ok(prior);
@@ -233,6 +222,7 @@ pub(super) fn check_edit_basis(
     repertoire: &str,
     basis: &CoverageEditBasis,
 ) -> Result<(), StoreError> {
+    check_coverage_repertoire(connection, dataset, repertoire)?;
     let current: bool = connection
         .query_row(
             "SELECT EXISTS (
@@ -252,6 +242,26 @@ pub(super) fn check_edit_basis(
     } else {
         Err(StoreError::StaleCoverage)
     }
+}
+
+fn check_coverage_repertoire(
+    connection: &Connection,
+    dataset: &DatasetId,
+    repertoire: &str,
+) -> Result<(), StoreError> {
+    let available: bool = connection.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM game_model_inputs AS input WHERE dataset_id=?1 AND repertoire_id=?2
+                AND state='verified'
+                AND NOT EXISTS (SELECT 1 FROM repertoire_suspensions
+                                WHERE dataset_id=input.dataset_id AND repertoire_id=input.repertoire_id)
+            )",
+            params![dataset.0, repertoire], |row| row.get(0),
+        ).map_err(database_error)?;
+    if !available {
+        return Err(StoreError::StaleCoverage);
+    }
+    Ok(())
 }
 
 fn starting_line(
