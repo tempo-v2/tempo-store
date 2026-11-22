@@ -18,6 +18,8 @@ pub enum StoreError {
     Unavailable(String),
     Conflict(String),
     Invalid(String),
+    /// An unaccepted forecast edit lost its report or starting line.
+    StaleCoverage,
     /// The selected adapter does not implement this operation.
     Unsupported(&'static str),
 }

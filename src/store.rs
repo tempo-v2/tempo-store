@@ -39,7 +39,18 @@ pub enum ContentSource<'a> {
         repertoire_id: &'a str,
         expected_content_revision: Revision,
         model_input: &'a crate::ModelInputStamp,
+        forecast: Option<&'a crate::CoverageEditBasis>,
     },
+}
+
+/// Evidence for the one-time partition command. Tempo supplies equivalence
+/// between the old and new answer; Store writes the lineage and game boundaries
+/// with the catalog and original command receipt.
+pub struct RepertoirePartition<'a> {
+    pub source_repertoire: &'a str,
+    pub destinations: &'a [&'a str],
+    pub source_by_destination: &'a std::collections::BTreeMap<TargetId, TargetId>,
+    pub applied_at_ms: u64,
 }
 
 /// A bounded, consistent read of the active dataset and selected repertoire.
@@ -588,6 +599,27 @@ pub trait Store {
         _dataset: &DatasetId,
     ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
         Err(StoreError::Unsupported("opponent_gaps"))
+    }
+
+    /// Current saved coverage line, with revision zero for an unset line.
+    fn coverage_start(
+        &self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+    ) -> Result<crate::CoverageLineSetting, StoreError> {
+        Err(StoreError::Unsupported("coverage_start"))
+    }
+
+    /// Save the verified application selection at both observed revisions.
+    fn save_coverage_start(
+        &mut self,
+        _dataset: &DatasetId,
+        _repertoire: &str,
+        _content_revision: Revision,
+        _expected_revision: u64,
+        _moves: &[String],
+    ) -> Result<crate::CoverageLineSetting, StoreError> {
+        Err(StoreError::Unsupported("save_coverage_start"))
     }
 
     /// The latest derived coverage report for an addressed repertoire.

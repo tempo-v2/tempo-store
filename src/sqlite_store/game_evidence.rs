@@ -56,6 +56,81 @@ pub(super) fn save_failure(
     Ok(())
 }
 
+/// Copy acceptance keys without creating a second assessment or receipt.
+pub(super) fn copy_partition_boundaries(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+    partition: crate::RepertoirePartition<'_>,
+) -> Result<(), StoreError> {
+    for destination in partition.destinations {
+        tx.execute(
+            "INSERT INTO restored_reset_boundaries
+             SELECT ?1,?3,max(reset_at_ms) FROM (
+                 SELECT reset_at_ms FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2
+                 UNION ALL
+                 SELECT reset_at_ms FROM restored_reset_boundaries WHERE dataset_id=?1 AND repertoire_id=?2
+             ) HAVING count(*)>0",
+            params![dataset.0, partition.source_repertoire, destination],
+        ).map_err(database_error)?;
+    }
+    for (destination, source) in partition.source_by_destination {
+        let inserted = tx
+            .execute(
+                "INSERT INTO repertoire_partition_lineage
+             SELECT ?1,destination.target_id,origin.target_id,destination.version,?4
+             FROM current_content AS destination JOIN current_content AS origin
+               ON origin.dataset_id=destination.dataset_id AND origin.version=destination.version
+             WHERE destination.dataset_id=?1 AND destination.target_id=?2 AND origin.target_id=?3",
+                params![dataset.0, destination.0, source.0, partition.applied_at_ms],
+            )
+            .map_err(database_error)?;
+        if inserted != 1 {
+            return Err(invalid("Partition lineage needs matching answer versions."));
+        }
+        tx.execute(
+            "INSERT INTO game_failures
+             SELECT dataset_id,source,game_id,?3,version,NULL,NULL
+             FROM game_failures WHERE dataset_id=?1 AND target_id=?2",
+            params![dataset.0, source.0, destination.0],
+        )
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+pub(super) fn partition_correction_game(
+    tx: &Transaction<'_>,
+    lookup: crate::CorrectionGameLookup<'_>,
+) -> Result<Option<crate::CorrectionGame>, StoreError> {
+    if let Some(game) = correction_game(tx, lookup)? {
+        return Ok(Some(game));
+    }
+    let origin: Option<(String, u64)> = tx
+        .query_row(
+            "SELECT source_target_id,applied_at_ms FROM repertoire_partition_lineage
+             WHERE dataset_id=?1 AND destination_target_id=?2 AND answer_version=?3",
+            params![
+                lookup.dataset.0,
+                lookup.target.0,
+                lookup.version.0.to_be_bytes().as_slice()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(database_error)?;
+    let Some((source, applied_at)) = origin else {
+        return Ok(None);
+    };
+    correction_game(
+        tx,
+        crate::CorrectionGameLookup {
+            target: &TargetId(source),
+            issued_at_ms: lookup.issued_at_ms.min(applied_at),
+            ..lookup
+        },
+    )
+}
+
 pub(super) fn correction_game(
     tx: &Transaction<'_>,
     lookup: crate::CorrectionGameLookup<'_>,

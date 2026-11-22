@@ -50,8 +50,8 @@ pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
 pub use sqlite_store::{SqliteStore, TacticPayoffPublication};
 pub use store::{
-    ContentReceipt, ContentSource, RepertoireDocument, RepertoireReset, Store, StudyOrderingWrite,
-    StudyScope,
+    ContentReceipt, ContentSource, RepertoireDocument, RepertoirePartition, RepertoireReset, Store,
+    StudyOrderingWrite, StudyScope,
 };
 pub use store_error::StoreError;
 pub use stored_attempt::{
@@ -93,4 +93,6 @@ pub use tactical_analysis::{
 };
 
 mod coverage;
-pub use coverage::{CoverageSummary, ForecastGap, SavedCoverage};
+pub use coverage::{
+    CoverageEditBasis, CoverageLineSetting, CoverageSummary, ForecastGap, SavedCoverage,
+};

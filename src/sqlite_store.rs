@@ -38,9 +38,13 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 21;
+const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
+const REPERTOIRE_PARTITION_LEGACY: &str =
+    include_str!("sqlite_store/repertoire_partition_legacy.sql");
 const TACTIC_QUALIFICATION_SCHEMA: &str = include_str!("sqlite_store/tactical_qualification.sql");
 const STUDY_EXCLUSIONS_SCHEMA: &str = include_str!("sqlite_store/study_exclusions.sql");
+const COVERAGE_START_SCHEMA: &str = include_str!("sqlite_store/coverage_start.sql");
 const COVERAGE_SCHEMA: &str = include_str!("sqlite_store/coverage.sql");
 const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.sql");
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
@@ -172,6 +176,12 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(COVERAGE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(COVERAGE_START_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(REPERTOIRE_PARTITION_SCHEMA)
             .map_err(database_error)?;
         transaction
             .execute_batch(REPERTOIRE_RUNS_SCHEMA)
@@ -355,7 +365,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=18) {
+        if matches!(schema_version(&connection)?, 2..=20) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -463,6 +473,20 @@ impl SqliteStore {
                 tx.execute_batch(TACTIC_QUALIFICATION_SCHEMA)
                     .map_err(database_error)?;
                 tactical_targets::initialize_qualifications(&tx)?;
+                tx.pragma_update(None, "user_version", 19)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 19 {
+                tx.execute_batch(COVERAGE_START_SCHEMA)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 20)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 20 {
+                tx.execute_batch(REPERTOIRE_PARTITION_SCHEMA)
+                    .map_err(database_error)?;
+                tx.execute_batch(REPERTOIRE_PARTITION_LEGACY)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }
@@ -945,7 +969,7 @@ impl Store for SqliteStore {
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
         })
         .map_err(database_error)?;
-        game_evidence::correction_game(&tx, lookup)
+        game_evidence::partition_correction_game(&tx, lookup)
     }
 
     fn stored_game(
@@ -1031,6 +1055,31 @@ impl Store for SqliteStore {
     ) -> Result<Vec<crate::GroupedOpponentGap>, StoreError> {
         let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.opponent_gaps");
         game_relevance::gaps(&self.connection, dataset)
+    }
+
+    fn coverage_start(
+        &self,
+        dataset: &DatasetId,
+        repertoire: &str,
+    ) -> Result<crate::CoverageLineSetting, StoreError> {
+        self.read_coverage_start(dataset, repertoire)
+    }
+
+    fn save_coverage_start(
+        &mut self,
+        dataset: &DatasetId,
+        repertoire: &str,
+        content_revision: Revision,
+        expected_revision: u64,
+        moves: &[String],
+    ) -> Result<crate::CoverageLineSetting, StoreError> {
+        self.write_coverage_start(
+            dataset,
+            repertoire,
+            content_revision,
+            expected_revision,
+            moves,
+        )
     }
 
     fn coverage_summary(
@@ -1532,6 +1581,30 @@ impl Store for SqliteStore {
         source: Option<ContentSource<'_>>,
         receipt: Option<ContentReceipt<'_>>,
     ) -> Result<Revision, StoreError> {
+        self.commit_content_batch(commit, source.into_iter().collect(), receipt, None)
+    }
+}
+
+impl SqliteStore {
+    /// Commit the one-time repertoire partition, including its verified
+    /// documents, copied Learning writes, history links and receipt.
+    pub fn commit_repertoire_partition(
+        &mut self,
+        commit: Commit,
+        documents: Vec<ContentSource<'_>>,
+        receipt: ContentReceipt<'_>,
+        partition: crate::RepertoirePartition<'_>,
+    ) -> Result<Revision, StoreError> {
+        self.commit_content_batch(commit, documents, Some(receipt), Some(partition))
+    }
+
+    fn commit_content_batch(
+        &mut self,
+        commit: Commit,
+        sources: Vec<ContentSource<'_>>,
+        receipt: Option<ContentReceipt<'_>>,
+        partition: Option<crate::RepertoirePartition<'_>>,
+    ) -> Result<Revision, StoreError> {
         let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_content");
         let transaction = crate::diagnostics::timed("sqlite.begin", || {
             self.connection
@@ -1539,12 +1612,19 @@ impl Store for SqliteStore {
         })
         .map_err(database_error)?;
         let dataset = commit.expected_dataset.clone();
-        if let Some(ContentSource::RepertoireDocument {
-            expected_content_revision,
-            ..
-        }) = &source
-        {
-            game_relevance::check_content_revision(&transaction, *expected_content_revision)?;
+        for source in &sources {
+            if let ContentSource::RepertoireDocument {
+                repertoire_id,
+                expected_content_revision,
+                forecast,
+                ..
+            } = source
+            {
+                game_relevance::check_content_revision(&transaction, *expected_content_revision)?;
+                if let Some(basis) = forecast {
+                    coverage::check_edit_basis(&transaction, &dataset, repertoire_id, basis)?;
+                }
+            }
         }
         let no_writes_with_receipt = commit.writes.is_empty() && receipt.is_some();
         let (mut revision, catalog_changed) = if no_writes_with_receipt {
@@ -1564,7 +1644,7 @@ impl Store for SqliteStore {
                 previous.dataset != next.dataset || previous.catalog != next.catalog,
             )
         };
-        if let Some(source) = source {
+        for source in sources {
             let (id, pgn, repertoire) = match source {
                 ContentSource::Archive { id, pgn } => (id, pgn, None),
                 ContentSource::RepertoireDocument {
@@ -1632,6 +1712,9 @@ impl Store for SqliteStore {
                     ).map_err(database_error)?;
                 }
             }
+        }
+        if let Some(partition) = partition {
+            game_evidence::copy_partition_boundaries(&transaction, &dataset, partition)?;
         }
         if let Some(receipt) = receipt {
             transaction
