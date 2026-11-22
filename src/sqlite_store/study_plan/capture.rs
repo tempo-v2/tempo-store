@@ -117,7 +117,7 @@ fn capture_inputs(
         let learning: LearningState =
             decode(&record.ok_or_else(|| invalid("current Study target has no Learning state"))?)?;
         Ok(StudyPlanTargetFacts {
-            availability: learning.daily_availability(content.version, day),
+            availability: learning.prepared_availability(content.version, day),
             miss_revision: learning.miss_revision,
             content,
         })
@@ -896,5 +896,63 @@ mod tests {
             .unwrap();
         assert_eq!(committed.content.status, ContentStatus::Retired);
         assert!(committed.availability.introduced_this_version);
+    }
+
+    #[test]
+    fn coherent_capture_keeps_due_work_behind_retired_games_obligations() {
+        use tempo_learning::{Correction, CorrectionLifecycle, DailyObligation};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut store, dataset) = fixture(&directory.path().join("study.sqlite"));
+        store.observe_study_day(&dataset, DAY).unwrap().unwrap();
+        let target = incomplete(store.capture_study_plan(&dataset).unwrap())
+            .targets
+            .into_iter()
+            .next()
+            .unwrap()
+            .content;
+        let mut state = LearningState {
+            introduced: true,
+            first_introduced: Some(StudyDay(DAY.0 - 1)),
+            due: Some(DAY),
+            correction: Some(Correction {
+                lifecycle: CorrectionLifecycle::LegacyGame,
+                answer_version: target.version,
+                clean_recalls: 0,
+                awaiting_introduction: false,
+                next_recall_day: Some(StudyDay(DAY.0 + 1)),
+                previous_move: None,
+            }),
+            ..LearningState::default()
+        };
+        let save = |store: &SqliteStore, state: &LearningState| {
+            store
+                .connection
+                .execute(
+                    "UPDATE learning SET state=?2 WHERE target_id=?1",
+                    params![target.target.0, encode(state).unwrap()],
+                )
+                .unwrap();
+        };
+        let availability = |store: &SqliteStore| {
+            incomplete(store.capture_study_plan(&dataset).unwrap())
+                .targets
+                .into_iter()
+                .find(|row| row.content.target == target.target)
+                .unwrap()
+                .availability
+        };
+        save(&store, &state);
+        assert_eq!(availability(&store).scheduled_due, Some(DAY));
+        assert_eq!(availability(&store).obligation, DailyObligation::None);
+
+        let correction = state.correction.as_mut().unwrap();
+        correction.lifecycle = CorrectionLifecycle::HumanTest;
+        correction.next_recall_day = None;
+        save(&store, &state);
+        assert_eq!(availability(&store).scheduled_due, None);
+        assert_eq!(
+            availability(&store).obligation,
+            DailyObligation::HumanCorrection
+        );
     }
 }
