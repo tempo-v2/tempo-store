@@ -111,3 +111,5 @@ mod coverage;
 pub use coverage::{
     CoverageEditBasis, CoverageLineSetting, CoverageSummary, ForecastGap, SavedCoverage,
 };
+
+pub use sqlite_store::{PublishStudySummary, StudyFamilySummary, StudySummary, StudySummaryRead};

@@ -1,5 +1,9 @@
 //! Store the prepared order in bounded, fenced SQLite transactions.
 
+mod summary;
+pub(super) use summary::SCHEMA as SUMMARY_SCHEMA;
+pub use summary::{PublishStudySummary, StudyFamilySummary, StudySummary, StudySummaryRead};
+
 mod authority;
 pub use authority::{StudyDayAuthority, StudyProfilePlanEffect};
 pub(super) use authority::{initialize_authority, migrate_authority, record_accepted_first_teach, record_issued_skip, acceptance_changes_basis, mark_acceptance_projections_dirty};

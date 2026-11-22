@@ -39,6 +39,7 @@ pub use study_plan::{
     StudyPlanTargetFacts, StudyProfileFacts,
     StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
 };
+pub use study_plan::{PublishStudySummary, StudyFamilySummary, StudySummary, StudySummaryRead};
 mod study_content;
 mod tactic_policy;
 mod tactical_analysis;
@@ -52,7 +53,7 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 const STUDY_PLAN_SCHEMA: &str = include_str!("sqlite_store/study_plan.sql");
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
@@ -219,6 +220,7 @@ impl SqliteStore {
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
+        transaction.execute_batch(study_plan::SUMMARY_SCHEMA).map_err(database_error)?;
         study_plan::initialize(&transaction)?;
         study_plan::initialize_authority(&transaction)?;
         transaction
@@ -544,6 +546,10 @@ impl SqliteStore {
             if schema_version(&tx)? == 26 {
                 authored_source_pairings::migrate(&tx)?;
                 tx.pragma_update(None, "user_version", 27).map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 27 {
+                tx.execute_batch(study_plan::SUMMARY_SCHEMA).map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 28).map_err(database_error)?;
             }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         }
