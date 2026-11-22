@@ -284,6 +284,44 @@ pub(super) fn initialize_qualifications(tx: &Transaction<'_>) -> Result<(), Stor
     Ok(())
 }
 
+/// Apply the Chess verdict to previously qualified game-owned cards.
+/// Unfinished qualifications already use the same rule in the normal worker.
+pub(super) fn withhold_ambiguous_captures(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let items: Vec<ContentItem> = read_selected(
+        tx,
+        "SELECT c.item FROM current_content c LEFT JOIN tactical_qualifications q
+         USING(dataset_id,target_id,version)
+         WHERE (q.result IS NULL OR q.result IN ('kept','shortened','extended','revised'))
+           AND EXISTS (SELECT 1 FROM tactical_requests r
+                       WHERE (r.dataset_id,r.target_id)=(c.dataset_id,c.target_id))",
+        [],
+        |row| text_value(row, 0),
+    )?;
+    let mut withheld = 0;
+    for item in items {
+        if tempo_chess::game_generated_definition(&item)
+            && tempo_chess::ambiguous_hanging_material(&item.definition, &item.verified_tactic)
+                .map_err(|error| invalid(&error.to_string()))?
+        {
+            withheld += tx
+                .execute(
+                    "INSERT INTO tactical_qualifications(dataset_id,target_id,version,result)
+                 SELECT dataset_id,target_id,version,'withheld' FROM current_content
+                 WHERE target_id=?1
+                 ON CONFLICT(dataset_id,target_id) DO UPDATE
+                 SET version=excluded.version,result=excluded.result",
+                    [&item.target.0],
+                )
+                .map_err(database_error)?;
+        }
+    }
+    if withheld > 0 {
+        let (_, current_revision) = revision(tx)?;
+        record_qualification_change(tx, current_revision, false)?;
+    }
+    Ok(())
+}
+
 impl super::SqliteStore {
     /// Pending work is keyed to the current definition, even when the
     /// original request points to an older version.
@@ -404,21 +442,32 @@ impl super::SqliteStore {
             params![new_version.as_slice(), result, dataset.0, basis.target.0],
         )
         .map_err(database_error)?;
-        let next_revision = rev
-            .0
-            .checked_add(1)
-            .ok_or_else(|| invalid("store revision exhausted"))?;
-        tx.execute("UPDATE store_state SET revision=?1,content_revision=content_revision+?2 WHERE singleton=1",
-            params![next_revision.to_be_bytes(),i32::from(new_version != version)],
-        ).map_err(database_error)?;
-        tx.execute(
-            "UPDATE tactical_report_generation SET evidence=evidence+1 WHERE singleton=1",
-            [],
-        )
-        .map_err(database_error)?;
+        record_qualification_change(&tx, rev, new_version != version)?;
         tx.commit().map_err(database_error)?;
         Ok(outcome)
     }
+}
+
+fn record_qualification_change(
+    tx: &Transaction<'_>,
+    current_revision: Revision,
+    content_changed: bool,
+) -> Result<(), StoreError> {
+    let next_revision = current_revision
+        .0
+        .checked_add(1)
+        .ok_or_else(|| invalid("store revision exhausted"))?;
+    tx.execute(
+        "UPDATE store_state SET revision=?1,content_revision=content_revision+?2 WHERE singleton=1",
+        params![next_revision.to_be_bytes(), i32::from(content_changed)],
+    )
+    .map_err(database_error)?;
+    tx.execute(
+        "UPDATE tactical_report_generation SET evidence=evidence+1 WHERE singleton=1",
+        [],
+    )
+    .map_err(database_error)?;
+    Ok(())
 }
 
 fn qualification_held(

@@ -38,7 +38,7 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
     include_str!("sqlite_store/repertoire_partition_legacy.sql");
@@ -365,7 +365,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=20) {
+        if (2..SCHEMA_VERSION).contains(&schema_version(&connection)?) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -487,6 +487,11 @@ impl SqliteStore {
                     .map_err(database_error)?;
                 tx.execute_batch(REPERTOIRE_PARTITION_LEGACY)
                     .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 21)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 21 {
+                tactical_targets::withhold_ambiguous_captures(&tx)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }

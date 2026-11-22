@@ -1632,6 +1632,58 @@ fn tactical_schema_15_backfills_lookup_and_preserves_schema_14_history() {
 }
 
 #[test]
+fn capture_upgrade_invalidates_progress_and_keeps_issued_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture-upgrade.sqlite");
+    let fen = "7k/8/8/1r1p1r2/3N4/6p1/7P/K7 w - - 0 1";
+    let answer = "d4b5".into();
+    let plan = tempo_chess::plan_tactical_puzzle(&Default::default(), fen, &answer, &[]).unwrap();
+    let target = plan.target;
+    let mut legacy_catalog = plan.content.catalog;
+    legacy_catalog
+        .items
+        .get_mut(&target)
+        .unwrap()
+        .verified_tactic = tempo_chess::recognizable_payoff(fen, &answer, &["d4b5".into()])
+        .unwrap()
+        .unwrap()
+        .motifs;
+    let dataset: DatasetId = "dataset".into();
+    let mut store = SqliteStore::create(
+        &path,
+        dataset.clone(),
+        legacy_catalog,
+        DailyLearning::default().settings(),
+    )
+    .unwrap();
+    game(&store, "one");
+    accept(&mut store, &analysis("one", Some(&target)), &target);
+    let request = store.pending_tactical_requests(&dataset).unwrap().remove(0);
+    issue_request(&mut store, &request, "old-capture");
+    let mut expected = store.snapshot().unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 21)
+        .unwrap();
+    drop(store);
+
+    let upgraded = SqliteStore::open(&path).unwrap();
+    expected.revision.0 += 1;
+    assert_eq!(upgraded.snapshot().unwrap(), expected);
+    let scope = StudyScope {
+        catalog: true,
+        ..Default::default()
+    };
+    assert!(
+        upgraded
+            .study_state(scope)
+            .unwrap()
+            .withheld_game_tactics
+            .contains(&target)
+    );
+}
+
+#[test]
 fn payoff_waits_for_issued_work_and_publishes_one_version_atomically() {
     use crate::TacticPayoffPublication::{Deferred, Obsolete, Published};
     let dir = tempfile::tempdir().unwrap();
