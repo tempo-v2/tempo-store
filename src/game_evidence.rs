@@ -62,6 +62,7 @@ impl GameRecord {
 }
 
 /// The issued identity and reset boundary of a guided repertoire repair.
+#[derive(Clone, Copy)]
 pub struct CorrectionGameLookup<'a> {
     pub dataset: &'a DatasetId,
     pub target: &'a TargetId,

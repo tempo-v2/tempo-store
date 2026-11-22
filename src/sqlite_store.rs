@@ -955,7 +955,7 @@ impl Store for SqliteStore {
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
         })
         .map_err(database_error)?;
-        game_evidence::correction_game(&tx, lookup)
+        game_evidence::partition_correction_game(&tx, lookup)
     }
 
     fn stored_game(
@@ -1542,6 +1542,24 @@ impl Store for SqliteStore {
         source: Option<ContentSource<'_>>,
         receipt: Option<ContentReceipt<'_>>,
     ) -> Result<Revision, StoreError> {
+        self.commit_content_batch(commit, source.into_iter().collect(), receipt, None)
+    }
+}
+
+impl SqliteStore {
+    /// Publish a planned catalog change and all its source documents at the same
+    /// revision. The receipt records the caller's command identity and mapping.
+    pub fn commit_content_batch(
+        &mut self,
+        commit: Commit,
+        sources: Vec<ContentSource<'_>>,
+        receipt: Option<ContentReceipt<'_>>,
+        partition: Option<(
+            &str,
+            &[&str],
+            &std::collections::BTreeMap<TargetId, TargetId>,
+        )>,
+    ) -> Result<Revision, StoreError> {
         let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_content");
         let transaction = crate::diagnostics::timed("sqlite.begin", || {
             self.connection
@@ -1549,12 +1567,14 @@ impl Store for SqliteStore {
         })
         .map_err(database_error)?;
         let dataset = commit.expected_dataset.clone();
-        if let Some(ContentSource::RepertoireDocument {
-            expected_content_revision,
-            ..
-        }) = &source
-        {
-            game_relevance::check_content_revision(&transaction, *expected_content_revision)?;
+        for source in &sources {
+            if let ContentSource::RepertoireDocument {
+                expected_content_revision,
+                ..
+            } = source
+            {
+                game_relevance::check_content_revision(&transaction, *expected_content_revision)?;
+            }
         }
         let no_writes_with_receipt = commit.writes.is_empty() && receipt.is_some();
         let (mut revision, catalog_changed) = if no_writes_with_receipt {
@@ -1574,7 +1594,7 @@ impl Store for SqliteStore {
                 previous.dataset != next.dataset || previous.catalog != next.catalog,
             )
         };
-        if let Some(source) = source {
+        for source in sources {
             let (id, pgn, repertoire) = match source {
                 ContentSource::Archive { id, pgn } => (id, pgn, None),
                 ContentSource::RepertoireDocument {
@@ -1642,6 +1662,15 @@ impl Store for SqliteStore {
                     ).map_err(database_error)?;
                 }
             }
+        }
+        if let Some((source, destinations, mapping)) = partition {
+            game_evidence::copy_partition_boundaries(
+                &transaction,
+                &dataset,
+                source,
+                destinations,
+                mapping,
+            )?;
         }
         if let Some(receipt) = receipt {
             transaction
