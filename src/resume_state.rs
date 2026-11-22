@@ -1,4 +1,4 @@
-//! The addressed read used by explicit Study Resume.
+//! Addressed reads for explicit Resume and the active attempt in Next.
 
 use crate::{StoreError, StoredAttempt};
 use tempo_chess::ContentStatus;
@@ -8,6 +8,8 @@ use tempo_types::{AttemptId, ContentVersion, DatasetId};
 /// Learning state, assessment history, receipts, or selection capability.
 pub trait AddressedResume {
     fn resume_state(&self, id: &AttemptId) -> Result<ResumeState, StoreError>;
+    /// Read the active pointer, its issued attempt and current compatibility together.
+    fn active_resume_state(&self) -> Result<ResumeState, StoreError>;
 }
 
 pub struct ResumeState {
