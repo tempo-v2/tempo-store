@@ -26,6 +26,7 @@ mod operation_probe;
 mod repertoire_resets;
 mod repertoire_runs;
 mod repertoire_suspensions;
+mod resume_read;
 mod row_values;
 mod save_snapshot;
 mod saved_reviews;

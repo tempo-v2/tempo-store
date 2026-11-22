@@ -12,6 +12,7 @@ mod commit;
 mod content_history;
 mod memory_store;
 mod receipt;
+mod resume_state;
 mod receipt_result;
 mod repertoire_run;
 mod saved_review;
@@ -42,6 +43,7 @@ pub use commit::Commit;
 pub use content_history::ContentHistory;
 pub use memory_store::MemoryStore;
 pub use receipt::Receipt;
+pub use resume_state::{AddressedResume, ResumeState, ResumeTarget};
 pub use receipt_result::ReceiptResult;
 pub use repertoire_activity::{
     RepertoireActivity, RepertoireActivityCommand, RepertoireActivityRead, RepertoireActivityResult,

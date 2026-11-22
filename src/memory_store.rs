@@ -54,6 +54,26 @@ impl DatasetIdentity for MemoryStore {
     }
 }
 
+impl crate::AddressedResume for MemoryStore {
+    fn resume_state(&self, id: &AttemptId) -> Result<crate::ResumeState, StoreError> {
+        let record = self.state.attempts.get(id);
+        let target = record
+            .and_then(|record| self.state.catalog.items.get(&record.attempt.target))
+            .map(|item| crate::ResumeTarget {
+                version: item.version,
+                status: item.status,
+                excluded: false,
+                suspended: false,
+            });
+        Ok(crate::ResumeState {
+            dataset: self.state.dataset.clone(),
+            active_attempt: self.state.active_attempt.clone(),
+            record: record.cloned(),
+            target,
+        })
+    }
+}
+
 impl Store for MemoryStore {
     fn latest_applied_test(
         &self,
