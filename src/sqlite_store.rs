@@ -38,9 +38,10 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 const TACTIC_QUALIFICATION_SCHEMA: &str = include_str!("sqlite_store/tactical_qualification.sql");
 const STUDY_EXCLUSIONS_SCHEMA: &str = include_str!("sqlite_store/study_exclusions.sql");
+const COVERAGE_START_SCHEMA: &str = include_str!("sqlite_store/coverage_start.sql");
 const COVERAGE_SCHEMA: &str = include_str!("sqlite_store/coverage.sql");
 const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.sql");
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
@@ -172,6 +173,9 @@ impl SqliteStore {
             .map_err(database_error)?;
         transaction
             .execute_batch(COVERAGE_SCHEMA)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(COVERAGE_START_SCHEMA)
             .map_err(database_error)?;
         transaction
             .execute_batch(REPERTOIRE_RUNS_SCHEMA)
@@ -355,7 +359,7 @@ impl SqliteStore {
             .map_err(database_error)?;
         configure(&connection)?;
         let mut choice_migration = None;
-        if matches!(schema_version(&connection)?, 2..=18) {
+        if matches!(schema_version(&connection)?, 2..=19) {
             let tx = crate::diagnostics::timed("sqlite.begin", || {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)
             })
@@ -463,6 +467,12 @@ impl SqliteStore {
                 tx.execute_batch(TACTIC_QUALIFICATION_SCHEMA)
                     .map_err(database_error)?;
                 tactical_targets::initialize_qualifications(&tx)?;
+                tx.pragma_update(None, "user_version", 19)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 19 {
+                tx.execute_batch(COVERAGE_START_SCHEMA)
+                    .map_err(database_error)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(database_error)?;
             }

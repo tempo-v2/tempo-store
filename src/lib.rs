@@ -93,4 +93,4 @@ pub use tactical_analysis::{
 };
 
 mod coverage;
-pub use coverage::{CoverageSummary, ForecastGap, SavedCoverage};
+pub use coverage::{CoverageLineSetting, CoverageSummary, ForecastGap, SavedCoverage};

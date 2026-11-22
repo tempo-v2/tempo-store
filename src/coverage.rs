@@ -4,6 +4,10 @@ use tempo_chess::OpponentGap;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CoverageSummary {
+    #[serde(default)]
+    pub starting_line: CoverageLineSetting,
+    #[serde(default)]
+    pub starting_san: Vec<String>,
     pub request_id: String,
     pub through_move: u8,
     pub target_percent: u8,
@@ -16,6 +20,7 @@ pub struct CoverageSummary {
 }
 
 pub struct ForecastGap {
+    pub starting_line: CoverageLineSetting,
     pub gap: OpponentGap,
     pub probability: f64,
     pub report_id: String,
@@ -27,4 +32,12 @@ pub struct ForecastGap {
 pub struct SavedCoverage {
     pub summary: CoverageSummary,
     pub stale: bool,
+}
+
+/// Exact moves and revision of the saved per-repertoire coverage input.
+/// Revision zero describes the original initial-position scan contract.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CoverageLineSetting {
+    pub revision: u64,
+    pub moves: Vec<String>,
 }
