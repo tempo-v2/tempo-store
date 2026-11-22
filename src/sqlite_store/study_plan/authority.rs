@@ -207,6 +207,35 @@ fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) 
     invalidate_membership(tx, dataset)
 }
 
+/// Fence prepared projections when an addressed receipt commits a Learning
+/// change for an issued Test or Repair. An unchanged intermediate move or
+/// stale correction leaves compatible projections alone.
+pub(in crate::sqlite_store) fn record_prepared_learning_change(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+    scope: StudyScope<'_>,
+) -> Result<(), StoreError> {
+    let Some(submission) = scope.submission.filter(|id| !previous.receipts.contains_key(*id)) else {
+        return Ok(());
+    };
+    let Some(ReceiptResult::Study(result)) =
+        next.receipts.get(submission).map(|receipt| &receipt.result)
+    else {
+        return Ok(());
+    };
+    let Some(issued) = previous.attempts.get(&result.attempt.id) else {
+        return Ok(());
+    };
+    if issued.issued_work.is_some()
+        && matches!(issued.mode, ActivityMode::Test | ActivityMode::Repair)
+        && previous.learning.get(&issued.attempt.target) != next.learning.get(&issued.attempt.target)
+    {
+        mark_acceptance_projections_dirty(tx, &next.dataset)?;
+    }
+    Ok(())
+}
+
 /// Record a newly accepted Skip of an exact issued obligation. A later Skip of
 /// the same obligation after Resume Skipped receives a newer day-local ordinal.
 pub(in crate::sqlite_store) fn record_issued_skip(

@@ -1814,6 +1814,7 @@ impl SqliteStore {
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&transaction, Some(&previous), &next)?;
         study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
+        study_plan::record_prepared_learning_change(&transaction, &previous, &next, scope)?;
         if let Some(day) = skip_day {
             study_plan::record_issued_skip(&transaction, &previous, &next, scope, day)?;
         }
