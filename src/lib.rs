@@ -54,7 +54,8 @@ pub use snapshot::Snapshot;
 pub use sqlite_store::{
     PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, SqliteStore,
     StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts,
-    StudyProfilePlanEffect, StudyProjectionBasis, TacticPayoffPublication,
+    StudyProfileFacts, StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
+    TacticPayoffPublication,
 };
 pub use store::{
     ContentReceipt, ContentSource, DatasetIdentity, RepertoireDocument, RepertoirePartition,

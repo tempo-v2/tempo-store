@@ -33,8 +33,8 @@ mod saved_reviews;
 mod study_plan;
 pub use study_plan::{
     PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, StudyDayAuthority,
-    StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProfilePlanEffect,
-    StudyProjectionBasis,
+    StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProfileFacts,
+    StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
 };
 mod study_content;
 mod tactic_policy;
