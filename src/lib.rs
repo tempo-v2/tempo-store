@@ -53,7 +53,8 @@ pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
 pub use sqlite_store::{
     PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, SqliteStore,
-    StudyProjectionBasis, TacticPayoffPublication,
+    StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProjectionBasis,
+    TacticPayoffPublication,
 };
 pub use store::{
     ContentReceipt, ContentSource, DatasetIdentity, RepertoireDocument, RepertoirePartition,
