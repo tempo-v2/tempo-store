@@ -572,16 +572,6 @@ impl SqliteStore {
                     ],
                 )
                 .map_err(database_error)?;
-            if raw == 1 {
-                super::tactical_analysis::enroll(
-                    &transaction,
-                    &previous.dataset,
-                    &game.source,
-                    &game.id,
-                    &entry.summary.learner,
-                    true,
-                )?;
-            }
             if raw == 0
                 && let Some(timing) = game.precise_pgn_timing()
             {
