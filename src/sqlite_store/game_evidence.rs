@@ -56,6 +56,68 @@ pub(super) fn save_failure(
     Ok(())
 }
 
+/// Copy acceptance keys without creating a second assessment or receipt.
+pub(super) fn copy_partition_boundaries(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+    source: &str,
+    destinations: &[&str],
+    mapping: &BTreeMap<TargetId, TargetId>,
+) -> Result<(), StoreError> {
+    for destination in destinations {
+        tx.execute(
+            "INSERT INTO restored_reset_boundaries
+             SELECT ?1,?3,max(reset_at_ms) FROM (
+                 SELECT reset_at_ms FROM repertoire_resets WHERE dataset_id=?1 AND repertoire_id=?2
+                 UNION ALL
+                 SELECT reset_at_ms FROM restored_reset_boundaries WHERE dataset_id=?1 AND repertoire_id=?2
+             ) HAVING count(*)>0",
+            params![dataset.0, source, destination],
+        ).map_err(database_error)?;
+    }
+    for (destination, source) in mapping {
+        tx.execute(
+            "INSERT INTO game_failures
+             SELECT dataset_id,source,game_id,?3,version,NULL,NULL
+             FROM game_failures WHERE dataset_id=?1 AND target_id=?2",
+            params![dataset.0, source.0, destination.0],
+        )
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+pub(super) fn partition_correction_game(
+    tx: &Transaction<'_>,
+    lookup: crate::CorrectionGameLookup<'_>,
+) -> Result<Option<crate::CorrectionGame>, StoreError> {
+    if let Some(game) = correction_game(tx, lookup)? {
+        return Ok(Some(game));
+    }
+    let prefix = format!("opening-partition-v1:{}:", lookup.dataset.0);
+    let origin: Option<(String, u64)> = tx
+        .query_row(
+            "SELECT mapping.value, json_extract(reply,'$.applied_at_ms')
+         FROM content_receipts, json_each(reply,'$.learning_sources') AS mapping
+         WHERE substr(request,1,length(?1))=?1 AND mapping.key=?2",
+            params![prefix, lookup.target.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(database_error)?;
+    let Some((source, applied_at)) = origin else {
+        return Ok(None);
+    };
+    correction_game(
+        tx,
+        crate::CorrectionGameLookup {
+            target: &TargetId(source),
+            issued_at_ms: lookup.issued_at_ms.min(applied_at),
+            ..lookup
+        },
+    )
+}
+
 pub(super) fn correction_game(
     tx: &Transaction<'_>,
     lookup: crate::CorrectionGameLookup<'_>,
