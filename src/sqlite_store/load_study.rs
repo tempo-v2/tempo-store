@@ -161,7 +161,8 @@ pub(super) fn load_study(
         TargetCoverage::Selected(targets.into_iter().map(|id| TargetId(id.clone())).collect())
     };
     Ok(StudyState {
-        repertoire_run: super::repertoire_runs::load(tx, &dataset)?,
+        // Retired run rows stay on disk and are outside active Study reads.
+        repertoire_run: None,
         suspended_repertoires: super::repertoire_suspensions::read(tx, &dataset)?,
         excluded_tactics,
         withheld_game_tactics,

@@ -651,3 +651,49 @@ fn study_lead_in_backfill_only_changes_current_metadata_and_rejects_stale_writes
         "a failed metadata write must roll back the revision"
     );
 }
+
+#[test]
+fn connected_run_retirement_leaves_legacy_rows_outside_live_reads_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("study.sqlite");
+    let mut store = create(&path, demo_catalog());
+    let issued = issue(&mut store);
+    let attempt = &issued.attempts[&tempo_types::AttemptId::from("attempt-1")].attempt;
+    store
+        .connection
+        .execute(
+            "INSERT INTO content_sources VALUES ('legacy-source', '*')",
+            [],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO repertoire_run_steps VALUES
+         ('dataset-a', 0, 'legacy', 'legacy-source', ?1, ?2,
+          'attempt-1', '\"test\"', 'malformed legacy lead-in', 0)",
+            params![
+                attempt.target.0,
+                attempt.content_version.0.to_be_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+
+    let live = store.study_state(StudyScope::default()).unwrap();
+    assert_eq!(live.active_attempt, issued.active_attempt);
+    assert!(live.repertoire_run.is_none());
+    assert!(store.snapshot().unwrap().repertoire_run.is_none());
+    commit(&mut store, &issued, successful_answer_writes(&issued)).unwrap();
+    let after = store.snapshot().unwrap();
+    assert_eq!(after.assessments.len(), 1);
+    assert_eq!(after.receipts.len(), 1);
+    let payload: String = store
+        .connection
+        .query_row(
+            "SELECT lead_in FROM repertoire_run_steps WHERE dataset_id='dataset-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(payload, "malformed legacy lead-in");
+}
