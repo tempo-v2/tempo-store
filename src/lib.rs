@@ -25,6 +25,7 @@ mod snapshot;
 mod sqlite_store;
 mod store;
 mod store_error;
+mod study_content;
 mod tactic_page;
 pub use tactic_page::{TACTIC_PAGE_SIZE, TacticFilter, TacticListRow, TacticPage, TacticPageQuery};
 mod diagnostics;
@@ -57,6 +58,10 @@ pub use store::{
     StudyOrderingWrite, StudyScope,
 };
 pub use store_error::StoreError;
+pub use study_content::{
+    CurrentStudyDefinition, IssuedStudyDefinition, StudyContentFacts, StudyContentFamily,
+    StudyContentRead, StudyLessonRead,
+};
 pub use stored_attempt::{
     AcceptanceKind, ActivityAcceptance, ActivityMode, IssuedTacticAttribution, RevealedDecision,
     StoredAttempt,

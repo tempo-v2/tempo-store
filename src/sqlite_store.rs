@@ -30,6 +30,7 @@ mod resume_read;
 mod row_values;
 mod save_snapshot;
 mod saved_reviews;
+mod study_content;
 mod tactic_policy;
 mod tactical_analysis;
 mod tactical_targets;

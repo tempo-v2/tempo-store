@@ -74,6 +74,66 @@ impl crate::AddressedResume for MemoryStore {
     }
 }
 
+impl crate::StudyContentRead for MemoryStore {
+    fn study_content_facts(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+    ) -> Result<Option<crate::StudyContentFacts>, StoreError> {
+        if dataset != &self.state.dataset {
+            return Ok(None);
+        }
+        Ok(self.state.catalog.items.get(target).map(|item| {
+            let family = match &item.definition.kind {
+                tempo_chess::ContentKind::Repertoire { repertoire, .. } => {
+                    crate::StudyContentFamily::Repertoire { repertoire_id: repertoire.clone() }
+                }
+                tempo_chess::ContentKind::Tactic { .. } => {
+                    crate::StudyContentFamily::Tactic { membership: item.tactic_policy_facts.clone() }
+                }
+            };
+            crate::StudyContentFacts {
+                target: target.clone(), version: item.version, family, status: item.status,
+                suspended: false, excluded: false, qualification_held: false,
+            }
+        }))
+    }
+
+    fn current_study_definition(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+        lesson: crate::StudyLessonRead,
+    ) -> Result<Option<crate::CurrentStudyDefinition>, StoreError> {
+        if dataset != &self.state.dataset {
+            return Ok(None);
+        }
+        Ok(self.state.catalog.items.get(target)
+            .filter(|item| item.version == version)
+            .map(|item| crate::CurrentStudyDefinition {
+                exercise: item.exercise(),
+                repertoire_label: item.definition.is_repertoire().then(|| item.label.clone()),
+                lesson: if lesson == crate::StudyLessonRead::Guided { item.lesson.clone() } else { None },
+            }))
+    }
+
+    fn issued_study_definition(
+        &self,
+        dataset: &DatasetId,
+        target: &TargetId,
+        version: ContentVersion,
+        lesson: crate::StudyLessonRead,
+    ) -> Result<Option<crate::IssuedStudyDefinition>, StoreError> {
+        Ok(self.state.content_history.iter()
+            .find(|row| &row.dataset == dataset && &row.item.target == target && row.item.version == version)
+            .map(|row| crate::IssuedStudyDefinition {
+                exercise: row.item.exercise(),
+                legacy_lesson: if lesson == crate::StudyLessonRead::Guided { row.item.lesson.clone() } else { None },
+            }))
+    }
+}
+
 impl Store for MemoryStore {
     fn latest_applied_test(
         &self,
