@@ -1296,50 +1296,73 @@ fn legacy_finding_preserves_binding_previously_moved_to_a_decision() {
     assert_eq!(after.learning, before.learning);
 }
 
-/// The counters track actual SQLite row writes, including no-op rewrites.
-fn tactical_write_counts(connection: &Connection) -> BTreeMap<String, u64> {
-    let mut query = connection
-        .prepare("SELECT name, count(*) FROM tactical_write_probe GROUP BY name")
-        .unwrap();
-    query
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
-}
+#[test]
+fn operation_contract_probe_guards_the_addressed_tactical_lookup() {
+    use super::super::operation_probe::probe_access;
+    use rusqlite::hooks::AuthAction;
 
-fn probe_tactical_writes(connection: &Connection) {
-    connection
-        .execute_batch("CREATE TEMP TABLE tactical_write_probe(name TEXT NOT NULL);")
+    const READ_UNRELATED: &str = "SELECT pgn FROM games WHERE id='unrelated'";
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, target) = fixture(&dir.path().join("probe.sqlite"));
+    let dataset: DatasetId = "dataset".into();
+    game(&store, "unrelated");
+    let lookup = tempo_chess::prepare_tactical_puzzle(START_FEN, &"e2e4".into(), &[])
+        .unwrap()
+        .lookup();
+
+    let deny_unrelated = |action: AuthAction<'_>| {
+        matches!(
+            action,
+            AuthAction::Read {
+                table_name: "games",
+                column_name: "pgn"
+            } | AuthAction::Update {
+                table_name: "games",
+                ..
+            }
+        )
+    };
+    let (items, observed) = probe_access(&mut store, deny_unrelated, |store| {
+        store.tactical_content_matches(&dataset, &lookup)
+    });
+    let items = items.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].target, target);
+    assert!(!observed.allowed.is_empty());
+    assert!(observed.denied.is_empty(), "{observed:?}");
+
+    // Prewarm a forbidden statement so this also covers cache handling.
+    drop(store.connection.prepare_cached(READ_UNRELATED).unwrap());
+    let (read, observed) = probe_access(&mut store, deny_unrelated, |store| {
+        store.connection.prepare_cached(READ_UNRELATED).map(|_| ())
+    });
+    assert!(read.is_err());
+    assert_eq!(observed.denied.len(), 1, "{observed:?}");
+
+    let (write, observed) = probe_access(&mut store, deny_unrelated, |store| {
+        store.connection.execute("UPDATE games SET pgn='{}'", [])
+    });
+    assert!(write.is_err());
+    assert_eq!(observed.denied.len(), 1, "{observed:?}");
+
+    // Poisoning an addressed payload must fail through the real consumer.
+    store
+        .connection
+        .execute(
+            "UPDATE current_content SET item='{}' WHERE target_id=?1",
+            [&target.0],
+        )
         .unwrap();
-    for table in [
-        "content_history",
-        "current_content",
-        "learning",
-        "attempts",
-        "assessments",
-        "receipts",
-        "repertoire_lines",
-        "line_targets",
-        "games",
-        "game_comparisons",
-        "tactical_requests",
-        "tactical_observations",
-        "tactical_analyses",
-    ] {
-        for operation in ["INSERT", "UPDATE", "DELETE"] {
-            connection
-                .execute_batch(&format!(
-                "CREATE TEMP TRIGGER track_{table}_{operation} AFTER {operation} ON main.{table}
-                 BEGIN INSERT INTO tactical_write_probe VALUES('{table}'); END;"
-            ))
-                .unwrap();
-        }
-    }
+    let (result, observed) = probe_access(&mut store, deny_unrelated, |store| {
+        store.tactical_content_matches(&dataset, &lookup)
+    });
+    assert!(result.is_err());
+    assert!(observed.denied.is_empty(), "{observed:?}");
 }
 
 #[test]
 fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
+    use super::super::operation_probe::{record_row_writes, row_write_counts};
     use rusqlite::StatementStatus;
     use tempo_chess::{Catalog, prepare_tactical_puzzle};
 
@@ -1467,7 +1490,24 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
             .unwrap();
         }
         tx.commit().unwrap();
-        probe_tactical_writes(&store.connection);
+        record_row_writes(
+            &store.connection,
+            &[
+                "content_history",
+                "current_content",
+                "learning",
+                "attempts",
+                "assessments",
+                "receipts",
+                "repertoire_lines",
+                "line_targets",
+                "games",
+                "game_comparisons",
+                "tactical_requests",
+                "tactical_observations",
+                "tactical_analyses",
+            ],
+        );
 
         let basis = store.tactical_acceptance_basis().unwrap();
         let new = prepare_tactical_puzzle(START_FEN, &"d2d4".into(), &[]).unwrap();
@@ -1509,7 +1549,7 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
             .unwrap();
         assert_eq!((accepted.new_observations, accepted.new_requests), (1, 1));
         assert_eq!(
-            tactical_write_counts(&store.connection),
+            row_write_counts(&store.connection),
             [
                 ("content_history".into(), 1),
                 ("current_content".into(), 1),
@@ -1523,7 +1563,7 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
 
         store
             .connection
-            .execute_batch("DELETE FROM tactical_write_probe;")
+            .execute_batch("DELETE FROM operation_write_probe;")
             .unwrap();
         let revised = prepare_tactical_puzzle(START_FEN, &"e2e4".into(), &[]).unwrap();
         let (decoded, match_steps, match_scans) =
@@ -1548,7 +1588,7 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
             target
         );
         assert_eq!(
-            tactical_write_counts(&store.connection),
+            row_write_counts(&store.connection),
             [
                 ("tactical_analyses".into(), 1),
                 ("tactical_observations".into(), 2),
@@ -1561,7 +1601,7 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
 
         store
             .connection
-            .execute_batch("DELETE FROM tactical_write_probe;")
+            .execute_batch("DELETE FROM operation_write_probe;")
             .unwrap();
         assert!(
             store
@@ -1569,13 +1609,13 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
                 .unwrap()
                 .replayed
         );
-        assert!(tactical_write_counts(&store.connection).is_empty());
+        assert!(row_write_counts(&store.connection).is_empty());
         second.analysis_version = "stale".into();
         assert!(matches!(
             store.commit_tactical_analysis(commit, &second),
             Err(StoreError::Conflict(_))
         ));
-        assert!(tactical_write_counts(&store.connection).is_empty());
+        assert!(row_write_counts(&store.connection).is_empty());
         assert_eq!(
             store.tactical_report_generation(&basis.dataset).unwrap(),
             amended_epoch

@@ -21,6 +21,8 @@ mod game_model;
 mod game_relevance;
 mod load_snapshot;
 mod load_study;
+#[cfg(test)]
+mod operation_probe;
 mod repertoire_resets;
 mod repertoire_runs;
 mod repertoire_suspensions;
