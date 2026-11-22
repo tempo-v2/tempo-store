@@ -11,11 +11,22 @@ pub(super) fn save_snapshot(
     previous: Option<&Snapshot>,
     next: &Snapshot,
 ) -> Result<(), StoreError> {
+    save_snapshot_with_admission_effect(transaction, previous, next).map(|_| ())
+}
+
+/// Persist through the ordinary path and report whether it released a current
+/// admission hold. Content acceptance folds this fact into its single fence.
+pub(super) fn save_snapshot_with_admission_effect(
+    transaction: &Transaction<'_>,
+    previous: Option<&Snapshot>,
+    next: &Snapshot,
+) -> Result<bool, StoreError> {
     let _diagnostic = crate::diagnostics::Operation::new("sqlite.save_snapshot.save_snapshot");
     save_history(transaction, previous, next)?;
 
     let replace_catalog =
         previous.is_none_or(|old| old.dataset != next.dataset || old.catalog != next.catalog);
+    let mut admission_gate_changed = false;
     if replace_catalog {
         if let Some(old) = previous.filter(|old| old.dataset == next.dataset) {
             super::game_model::catalog_changed(
@@ -25,7 +36,7 @@ pub(super) fn save_snapshot(
                 &next.catalog,
             )?;
         }
-        save_catalog(transaction, next)?;
+        admission_gate_changed = save_catalog(transaction, next)?;
         if previous.is_some() {
             transaction
                 .execute(
@@ -102,7 +113,7 @@ pub(super) fn save_snapshot(
     if let Some(previous) = previous {
         super::tactical_analysis::settle_attempts(transaction, previous, next)?;
     }
-    Ok(())
+    Ok(admission_gate_changed)
 }
 
 fn save_history(
@@ -136,7 +147,7 @@ fn save_history(
     Ok(())
 }
 
-fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<(), StoreError> {
+fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<bool, StoreError> {
     let _diagnostic = crate::diagnostics::Operation::new("sqlite.save_snapshot.save_catalog");
     transaction
         .execute_batch(
@@ -146,6 +157,7 @@ fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<(), St
              DELETE FROM current_content;",
         )
         .map_err(database_error)?;
+    let mut admission_gate_changed = false;
     for item in next.catalog.items.values() {
         let (repertoire, position) = match &item.definition.kind {
             ContentKind::Repertoire {
@@ -168,7 +180,8 @@ fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<(), St
             )
             .map_err(database_error)?;
         super::tactical_targets::index_item(transaction, item)?;
-        super::tactical_targets::release_independent_tactic(transaction, &next.dataset, item)?;
+        admission_gate_changed |=
+            super::tactical_targets::release_independent_tactic(transaction, &next.dataset, item)?;
     }
     for (ordinal, line) in next.catalog.lines.iter().enumerate() {
         transaction
@@ -191,7 +204,7 @@ fn save_catalog(transaction: &Transaction<'_>, next: &Snapshot) -> Result<(), St
                 .map_err(database_error)?;
         }
     }
-    Ok(())
+    Ok(admission_gate_changed)
 }
 
 fn save_outcomes(
@@ -234,7 +247,12 @@ fn save_outcomes(
             transaction
                 .execute(
                     "INSERT INTO receipts VALUES (?1, ?2, ?3, ?4)",
-                    params![id.0, attempt, receipt.command, encode_receipt(&receipt.result)?],
+                    params![
+                        id.0,
+                        attempt,
+                        receipt.command,
+                        encode_receipt(&receipt.result)?
+                    ],
                 )
                 .map_err(database_error)?;
         }

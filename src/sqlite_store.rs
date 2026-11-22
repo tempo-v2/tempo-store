@@ -1698,7 +1698,14 @@ impl SqliteStore {
         } else {
             let previous = load_snapshot(&transaction)?;
             let next = stage_commit(&previous, commit)?;
-            save_snapshot(&transaction, Some(&previous), &next)?;
+            let gate_released = save_snapshot::save_snapshot_with_admission_effect(
+                &transaction, Some(&previous), &next,
+            )?;
+            if previous.dataset == next.dataset
+                && (gate_released || prepared_content_changed(&transaction, &previous, &next)?)
+            {
+                study_plan::mark_content_projections_dirty(&transaction, &dataset)?;
+            }
             (
                 next.revision,
                 previous.dataset != next.dataset || previous.catalog != next.catalog,
@@ -1788,6 +1795,67 @@ impl SqliteStore {
             .map_err(database_error)?;
         Ok(revision)
     }
+}
+
+fn prepared_content_changed(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+) -> Result<bool, StoreError> {
+    use std::collections::BTreeSet;
+
+    // Route identity and presentation may change without moving an occurrence.
+    // Prerequisites depend on the ordered target sequence within each route.
+    let routes = |catalog: &Catalog| {
+        catalog.lines.iter().map(|line| (line.repertoire.clone(), line.targets.clone()))
+            .collect::<BTreeSet<_>>()
+    };
+    if previous.catalog.items.len() != next.catalog.items.len()
+        || (previous.catalog.lines != next.catalog.lines
+            && routes(&previous.catalog) != routes(&next.catalog))
+    {
+        return Ok(true);
+    }
+
+    let day = if previous.learning != next.learning {
+        tx.query_row(
+            "SELECT study_day FROM study_projection_state WHERE dataset_id=?1",
+            [&next.dataset.0],
+            |row| row.get::<_, Option<i32>>(0),
+        ).optional().map_err(database_error)?.flatten().map(StudyDay)
+    } else {
+        None
+    };
+    for (target, before) in &previous.catalog.items {
+        let Some(after) = next.catalog.items.get(target) else {
+            return Ok(true);
+        };
+        if before.version != after.version
+            || before.active() != after.active()
+            || before.definition.kind != after.definition.kind
+        {
+            return Ok(true);
+        }
+        let (old, new) = (&previous.learning[target], &next.learning[target]);
+        if before.active() && !before.definition.is_repertoire() && !new.introduced {
+            let before_themes = before.tactic_policy_facts.as_ref()
+                .map(|facts| facts.theme_ids()).filter(|themes| !themes.is_empty());
+            let after_themes = after.tactic_policy_facts.as_ref()
+                .map(|facts| facts.theme_ids()).filter(|themes| !themes.is_empty());
+            if before_themes != after_themes {
+                return Ok(true);
+            }
+        }
+        if before.active() && old != new
+            && day.is_some_and(|day| {
+                old.miss_revision != new.miss_revision
+                    || old.prepared_availability(before.version, day) != new.prepared_availability(after.version, day)
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl SqliteStore {

@@ -243,19 +243,27 @@ pub(super) fn release_independent_tactic(
     tx: &Transaction<'_>,
     dataset: &DatasetId,
     item: &ContentItem,
-) -> Result<(), StoreError> {
-    let gated: bool = tx.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM tactical_qualifications WHERE dataset_id=?1 AND target_id=?2)",
-    ).map_err(database_error)?.query_row(params![dataset.0,item.target.0], |row| row.get(0))
-        .map_err(database_error)?;
-    if gated && !tempo_chess::game_generated_definition(item) {
-        tx.execute(
-            "DELETE FROM tactical_qualifications WHERE dataset_id=?1 AND target_id=?2",
-            params![dataset.0, item.target.0],
-        )
-        .map_err(database_error)?;
+) -> Result<bool, StoreError> {
+    if tempo_chess::game_generated_definition(item) {
+        return Ok(false);
     }
-    Ok(())
+    let released: Option<bool> = tx
+        .prepare_cached(
+            "DELETE FROM tactical_qualifications WHERE dataset_id=?1 AND target_id=?2
+             RETURNING version=?3 AND result IN ('pending','withheld')",
+        )
+        .map_err(database_error)?
+        .query_row(
+            params![
+                dataset.0,
+                item.target.0,
+                item.version.0.to_be_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?;
+    Ok(released.unwrap_or(false))
 }
 
 /// Install the quality gate only for verified game-owned content with a retained

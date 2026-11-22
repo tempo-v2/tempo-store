@@ -82,6 +82,13 @@ pub(super) fn initialize(transaction: &Transaction<'_>) -> Result<(), StoreError
     Ok(())
 }
 
+pub(super) fn mark_content_projections_dirty(
+    tx: &Transaction<'_>,
+    dataset: &DatasetId,
+) -> Result<(), StoreError> {
+    authority::mark_acceptance_projections_dirty(tx, dataset)
+}
+
 impl SqliteStore {
     /// Publish a civil day calculated by the runtime calendar. The dataset
     /// and the persisted timezone must still match the inputs used to
