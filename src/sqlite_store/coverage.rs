@@ -302,6 +302,7 @@ mod tests {
             StandardLearning::<tempo_learning::FixedIntervalScheduler>::default().settings(),
         )
         .unwrap();
+        super::super::study_plan::remove_schema_for_prior_version_fixture(&store.connection);
         store
             .connection
             .execute_batch(

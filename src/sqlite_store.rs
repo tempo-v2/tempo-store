@@ -3,7 +3,7 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
+    Commit, DatasetIdentity, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
     RepertoireDocument, RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
     StudyState, Write,
 };
@@ -21,12 +21,23 @@ mod game_model;
 mod game_relevance;
 mod load_snapshot;
 mod load_study;
+#[cfg(test)]
+mod operation_probe;
 mod repertoire_resets;
 mod repertoire_runs;
 mod repertoire_suspensions;
+mod resume_read;
 mod row_values;
 mod save_snapshot;
 mod saved_reviews;
+mod study_plan;
+pub use study_plan::{
+    PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, StudyDayAuthority,
+    StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProfilePlanEffect,
+    StudyProjectionBasis,
+};
+mod study_content;
+mod tactic_policy;
 mod tactical_analysis;
 mod tactical_targets;
 pub use tactical_targets::TacticPayoffPublication;
@@ -38,7 +49,8 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 25;
+const STUDY_PLAN_SCHEMA: &str = include_str!("sqlite_store/study_plan.sql");
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
     include_str!("sqlite_store/repertoire_partition_legacy.sql");
@@ -196,6 +208,8 @@ impl SqliteStore {
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
+        study_plan::initialize(&transaction)?;
+        study_plan::initialize_authority(&transaction)?;
         transaction
             .execute(
                 "UPDATE store_state SET local_profile=?1 WHERE singleton=1",
@@ -492,7 +506,22 @@ impl SqliteStore {
             }
             if schema_version(&tx)? == 21 {
                 tactical_targets::withhold_ambiguous_captures(&tx)?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                tx.pragma_update(None, "user_version", 22)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 22 {
+                tactic_policy::migrate(&tx)?;
+                tx.pragma_update(None, "user_version", 23)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 23 {
+                study_plan::initialize(&tx)?;
+                tx.pragma_update(None, "user_version", 24)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 24 {
+                study_plan::migrate_authority(&tx)?;
+                tx.pragma_update(None, "user_version", 25)
                     .map_err(database_error)?;
             }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
@@ -527,6 +556,18 @@ impl SqliteStore {
         game_relevance::comparison_marker(&self.connection)
     }
 
+    /// Read the current dataset and actual SQLite schema together for application context.
+    pub fn context_identity(&self) -> Result<(DatasetId, i64), StoreError> {
+        self.connection
+            .query_row(
+                "SELECT dataset_id, user_version FROM store_state, pragma_user_version() \
+                 WHERE singleton=1",
+                [],
+                |row| Ok((DatasetId(row.get(0)?), row.get(1)?)),
+            )
+            .map_err(database_error)
+    }
+
     /// Read desired books, source associations and active target facts at one revision.
     pub fn projection_books(
         &self,
@@ -540,6 +581,18 @@ impl SqliteStore {
 }
 
 mod tactic_page;
+
+impl DatasetIdentity for SqliteStore {
+    fn dataset_id(&self) -> Result<DatasetId, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT dataset_id FROM store_state WHERE singleton=1",
+                [],
+                |row| row.get(0).map(DatasetId),
+            )
+            .map_err(database_error)
+    }
+}
 
 impl Store for SqliteStore {
     fn latest_applied_test(
@@ -1468,6 +1521,7 @@ impl Store for SqliteStore {
         let previous = load_study::staging_image(state);
         let next = stage_commit(&previous, commit)?;
         save_snapshot(&transaction, Some(&previous), &next)?;
+        study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
         crate::diagnostics::timed("sqlite.commit", || transaction.commit())
             .map_err(database_error)?;
         Ok(next.revision)
@@ -1765,3 +1819,53 @@ fn database_error(error: rusqlite::Error) -> StoreError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dataset_identity_tests {
+    use super::*;
+    use tempo_learning::{DailyLearning, LearningPolicy};
+
+    #[test]
+    fn metadata_context_reads_only_the_dataset_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::create(
+            dir.path().join("metadata.sqlite"),
+            "identity-only".into(),
+            Catalog::default(),
+            DailyLearning::default().settings(),
+        )
+        .unwrap();
+        store
+            .connection
+            .execute("UPDATE store_state SET policy='{}'", [])
+            .unwrap();
+        let (result, access) = operation_probe::probe_access(
+            &mut store,
+            |action| {
+                !matches!(
+                    action,
+                    rusqlite::hooks::AuthAction::Read {
+                        table_name: "store_state",
+                        column_name: "dataset_id" | "singleton",
+                    }
+                )
+            },
+            |store| store.dataset_id(),
+        );
+        assert_eq!(result.unwrap(), DatasetId("identity-only".into()));
+        assert_eq!(
+            store.context_identity().unwrap(),
+            (DatasetId("identity-only".into()), SCHEMA_VERSION)
+        );
+
+        assert!(access.denied.is_empty());
+        assert!(!access.allowed.is_empty());
+
+        store
+            .connection
+            .execute("DELETE FROM store_state", [])
+            .unwrap();
+        assert!(store.dataset_id().is_err());
+        assert!(store.context_identity().is_err());
+    }
+}

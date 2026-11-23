@@ -12,6 +12,7 @@ mod commit;
 mod content_history;
 mod memory_store;
 mod receipt;
+mod resume_state;
 mod receipt_result;
 mod repertoire_run;
 mod saved_review;
@@ -24,6 +25,7 @@ mod snapshot;
 mod sqlite_store;
 mod store;
 mod store_error;
+mod study_content;
 mod tactic_page;
 pub use tactic_page::{TACTIC_PAGE_SIZE, TacticFilter, TacticListRow, TacticPage, TacticPageQuery};
 mod diagnostics;
@@ -41,19 +43,29 @@ pub use chess_attempt::ChessAttempt;
 pub use commit::Commit;
 pub use content_history::ContentHistory;
 pub use memory_store::MemoryStore;
-pub use receipt::Receipt;
+pub use receipt::{Receipt, StudyReceiptLookup, StudyReceiptRead};
+pub use resume_state::{AddressedResume, ResumeState, ResumeTarget};
 pub use receipt_result::ReceiptResult;
 pub use repertoire_activity::{
     RepertoireActivity, RepertoireActivityCommand, RepertoireActivityRead, RepertoireActivityResult,
 };
 pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
-pub use sqlite_store::{SqliteStore, TacticPayoffPublication};
+pub use sqlite_store::{
+    PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, SqliteStore,
+    StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts,
+    StudyProfilePlanEffect, StudyProjectionBasis, TacticPayoffPublication,
+};
 pub use store::{
-    ContentReceipt, ContentSource, RepertoireDocument, RepertoirePartition, RepertoireReset, Store,
+    ContentReceipt, ContentSource, DatasetIdentity, RepertoireDocument, RepertoirePartition,
+    RepertoireReset, Store,
     StudyOrderingWrite, StudyScope,
 };
 pub use store_error::StoreError;
+pub use study_content::{
+    CurrentStudyDefinition, IssuedStudyDefinition, StudyContentFacts, StudyContentFamily,
+    StudyContentRead, StudyLessonRead,
+};
 pub use stored_attempt::{
     AcceptanceKind, ActivityAcceptance, ActivityMode, IssuedTacticAttribution, RevealedDecision,
     StoredAttempt,

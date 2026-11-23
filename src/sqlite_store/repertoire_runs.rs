@@ -1,43 +1,9 @@
 //! Bounded storage for the active run and its current-version recall evidence.
 use super::database_error;
-use super::row_values::{decode, decode_counter, encode, read_selected};
-use crate::{AssessmentRecord, RepertoireRun, RepertoireRunStep, StoreError};
+use super::row_values::{decode, encode};
+use crate::{AssessmentRecord, RepertoireRun, StoreError};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use tempo_types::{AttemptId, ContentVersion, DatasetId, Grade, TargetId};
-
-pub(super) fn load(db: &Connection, dataset: &str) -> Result<Option<RepertoireRun>, StoreError> {
-    let rows: Vec<_> = read_selected(
-        db,
-        "SELECT repertoire_id, source_id, target_id, version, attempt_id, mode, lead_in, skipped_warmup
-         FROM repertoire_run_steps WHERE dataset_id=?1 ORDER BY ordinal",
-        [dataset],
-        |row| {
-            let step = RepertoireRunStep {
-                target: TargetId(row.get(2).map_err(database_error)?),
-                version: ContentVersion(decode_counter(row.get(3).map_err(database_error)?)?),
-                issued: row.get::<_, Option<String>>(4).map_err(database_error)?.map(AttemptId),
-                mode: decode(&row.get::<_, String>(5).map_err(database_error)?)?,
-                lead_in: row.get::<_, Option<String>>(6).map_err(database_error)?
-                    .as_deref().map(decode).transpose()?,
-            };
-            Ok((
-                row.get::<_, String>(0).map_err(database_error)?,
-                row.get::<_, String>(1).map_err(database_error)?,
-                row.get::<_, bool>(7).map_err(database_error)?,
-                step,
-            ))
-        },
-    )?;
-    let Some((repertoire, source_id, skipped_warmup, _)) = rows.first() else {
-        return Ok(None);
-    };
-    Ok(Some(RepertoireRun {
-        repertoire: repertoire.clone(),
-        source_id: source_id.clone(),
-        skipped_warmup: *skipped_warmup,
-        steps: rows.into_iter().map(|(_, _, _, step)| step).collect(),
-    }))
-}
+use tempo_types::{ContentVersion, DatasetId, Grade, TargetId};
 
 pub(super) fn save(
     tx: &Transaction<'_>,

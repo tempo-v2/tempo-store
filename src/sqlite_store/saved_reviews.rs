@@ -1,4 +1,4 @@
-use super::row_values::{decode, decode_counter, read_selected, text_value};
+use super::row_values::{STUDY_RECEIPT_VERSION, decode, decode_counter, read_selected, text_value};
 use super::{database_error, load_study, save_snapshot, stage_commit};
 use crate::{
     ChessAttempt, Commit, RevealedDecision, ReviewCommandKey, ReviewWrite, SavedReview,
@@ -86,16 +86,26 @@ pub(super) fn context(
                 (SELECT max(revealed) FROM later_attempts WHERE status='abandoned'),
                 CASE WHEN json_extract(mark.source_record, '$.issued_revision') IS NULL
                      AND json_extract(mark.source_record, '$.revealed_decision') IS NULL
-                     THEN EXISTS(SELECT 1 FROM receipts
-                                 WHERE attempt_id=mark.attempt_id
-                                   AND json_extract(result, '$.Study.attempt.state.decision_index')=mark.decision_index
-                                   AND json_extract(result, '$.Study.feedback.correct')=0)
+                     THEN EXISTS(
+                       SELECT 1 FROM (
+                           SELECT CASE
+                               WHEN NOT json_valid(result) THEN NULL
+                               WHEN json_type(result, '$.Study.receipt_version') IS NULL
+                                   THEN result -> '$.Study'
+                               WHEN json_type(result, '$.Study.receipt_version')='integer'
+                                    AND result ->> '$.Study.receipt_version'=?3
+                                   THEN result -> '$.Study.outcome'
+                           END AS study_answer
+                           FROM receipts WHERE attempt_id=mark.attempt_id
+                       )
+                       WHERE json_extract(study_answer, '$.attempt.state.decision_index')=mark.decision_index
+                         AND json_extract(study_answer, '$.feedback.correct')=0)
                      ELSE 0 END,
                 EXISTS(SELECT 1 FROM study_exclusions x
                        WHERE (x.dataset_id,x.target_id)=(mark.dataset_id,mark.target_id))
          FROM mark JOIN store_state s ON s.singleton=1
          LEFT JOIN attempts active ON active.id=s.active_attempt_id AND active.target_id=mark.target_id",
-        params![dataset.0, id],
+        params![dataset.0, id, STUDY_RECEIPT_VERSION],
         |row| {
             Ok(SavedReviewContext {
                 decision_index: row.get(0).map_err(database_error)?,

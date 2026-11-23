@@ -1,7 +1,7 @@
 //! Read live study facts and indexed rows for the current command.
 use super::database_error;
 use super::load_snapshot::load_lines;
-use super::row_values::{decode, decode_counter, read_selected, text_value};
+use super::row_values::{decode, decode_counter, read_selected, receipt_value, text_value};
 use crate::{Receipt, Snapshot, StoreError, StoredAttempt, StudyScope, StudyState, TargetCoverage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +100,7 @@ pub(super) fn load_study(
                     Receipt {
                         id: id.clone(),
                         command: row.get(0).map_err(database_error)?,
-                        result: text_value(row, 1)?,
+                        result: receipt_value(row, 1)?,
                     },
                 ))
             },
@@ -161,7 +161,8 @@ pub(super) fn load_study(
         TargetCoverage::Selected(targets.into_iter().map(|id| TargetId(id.clone())).collect())
     };
     Ok(StudyState {
-        repertoire_run: super::repertoire_runs::load(tx, &dataset)?,
+        // Retired run rows stay on disk and are outside active Study reads.
+        repertoire_run: None,
         suspended_repertoires: super::repertoire_suspensions::read(tx, &dataset)?,
         excluded_tactics,
         withheld_game_tactics,
