@@ -763,46 +763,65 @@ mod tests {
         let record = &before.attempts[&attempt_id];
         let stopped = tempo_study::abandon(&record.attempt, record.attempt.revision).unwrap();
         let submission = tempo_types::SubmissionId::from("fixture-correction-skip");
-        store.commit_issued_skip(
-            Commit {
-                expected_revision: before.revision,
-                expected_dataset: dataset.clone(),
-                writes: vec![
-                    Write::Progress(crate::StoredAttempt {
-                        attempt: stopped.clone(),
-                        ..record.clone()
-                    }),
-                    Write::Active(None),
-                    Write::Receipt(Receipt {
-                        id: submission.clone(),
-                        command: "fixture exact Skip command".into(),
-                        result: ReceiptResult::Study(AnswerResult {
-                            attempt: stopped,
-                            feedback: None,
-                            assessment: None,
-                            learning_effect: None,
+        let apply_skip = |store: &mut SqliteStore| {
+            store.commit_issued_skip(
+                Commit {
+                    expected_revision: before.revision,
+                    expected_dataset: dataset.clone(),
+                    writes: vec![
+                        Write::Progress(crate::StoredAttempt {
+                            attempt: stopped.clone(),
+                            ..record.clone()
                         }),
-                    }),
-                ],
-            },
-            StudyScope {
-                attempt: Some(&attempt_id),
-                submission: Some(&submission),
-                ..StudyScope::default()
-            },
-            skip_day,
+                        Write::Active(None),
+                        Write::Receipt(Receipt {
+                            id: submission.clone(),
+                            command: "fixture exact Skip command".into(),
+                            result: ReceiptResult::Study(AnswerResult {
+                                attempt: stopped.clone(),
+                                feedback: None,
+                                assessment: None,
+                                learning_effect: None,
+                            }),
+                        }),
+                    ],
+                },
+                StudyScope {
+                    attempt: Some(&attempt_id),
+                    submission: Some(&submission),
+                    ..StudyScope::default()
+                },
+                skip_day,
+            )
+        };
+        let captured = |store: &SqliteStore| incomplete(store.capture_study_plan(&dataset).unwrap());
+        let before_skip = captured(&store);
+        // Projection invalidation follows deferral, receipt and active-slot writes.
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_skip_invalidation BEFORE UPDATE OF membership_epoch
+             ON study_projection_state BEGIN SELECT RAISE(ABORT, 'injected late Skip failure'); END",
         ).unwrap();
+        let failure = apply_skip(&mut store).unwrap_err();
+        assert!(failure.to_string().contains("injected late Skip failure"));
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert_eq!(captured(&store), before_skip);
+        store.connection.execute_batch("DROP TRIGGER reject_skip_invalidation").unwrap();
+        apply_skip(&mut store).unwrap();
         drop(store);
 
         // The next build reads the durable, exact deferral from a new connection.
         let mut store = SqliteStore::open(&path).unwrap();
-        let captured = |store: &SqliteStore| incomplete(store.capture_study_plan(&dataset).unwrap());
         let after_skip = captured(&store);
         assert_eq!(after_skip.active_work, ActiveStudyWork::None);
         assert_eq!(
             after_skip.effective_deferrals.unwrap(),
-            vec![DeferredWork { day: skip_day, obligation: bound }],
+            vec![DeferredWork {
+                day: skip_day,
+                obligation: bound.clone(),
+            }],
         );
+        let current = after_skip.targets.iter().find(|fact| fact.content.target == bound.target).unwrap();
+        assert_eq!(current.miss_revision, MissRevision(17));
         let rollover = StudyDay(skip_day.0 + 1);
         store.observe_study_day(&dataset, rollover).unwrap();
         assert!(captured(&store).effective_deferrals.unwrap().is_empty());

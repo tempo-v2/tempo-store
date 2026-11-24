@@ -1,8 +1,9 @@
 //! StoredAttempt and its usage scenarios.
 
-use crate::{ChessAttempt, TacticGameOrigin};
+use crate::{ChessAttempt, StoreError, TacticGameOrigin, store_error::invalid};
 use serde::{Deserialize, Serialize};
-use tempo_types::{MissRevision, Revision, StudyTime, WorkKind, WorkToken};
+use tempo_study::AttemptStatus;
+use tempo_types::{Grade, MissRevision, Revision, StudyTime, WorkKind, WorkToken};
 
 /// Fixed when an activity is durably issued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +112,18 @@ pub struct StoredAttempt {
 }
 
 impl StoredAttempt {
+    pub(crate) fn validate_presentation_state(&self) -> Result<(), StoreError> {
+        let attempt = &self.attempt;
+        if (attempt.status == AttemptStatus::Active) != attempt.prompt.is_some()
+            || (attempt.terminal == Some(Grade::Good) && attempt.status != AttemptStatus::Complete)
+        {
+            return Err(invalid(
+                "attempt presentation and terminal state are inconsistent",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_consistent_work_identity(&self) -> bool {
         let Some(work) = &self.issued_work else {
             return true;

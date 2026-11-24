@@ -60,6 +60,8 @@ impl SqliteStore {
             return Err(invalid("incompatible prepared Study issue"));
         }
 
+        record.validate_presentation_state()?;
+
         let tx = self.plan_write()?;
         if compatible_ready_head(&tx, dataset, candidate.generation, today)?
             != Some((candidate.membership, false))
@@ -289,6 +291,47 @@ mod tests {
                 .unwrap(),
             PreparedStudyNext::Preparing,
         );
+    }
+
+    #[test]
+    fn prepared_issue_rejects_active_record_without_prompt_before_mutation() {
+        let (_directory, mut store, basis) = fixture();
+        let entry = teach("r1:p1", 0);
+        let head = publish(&mut store, &basis, std::slice::from_ref(&entry));
+        let selected = candidate(&store, &basis, head);
+        let before = store.snapshot().unwrap();
+        let epochs = store.study_projection_basis(&basis.dataset).unwrap();
+        let mut record = test_support::issued_record(&before);
+        record.issued_work = Some(entry.work.clone());
+        record.mode = crate::ActivityMode::Teach;
+        record.first_introduction = true;
+
+        let mut missing_prompt = record.clone();
+        missing_prompt.attempt.prompt = None;
+        assert!(matches!(
+            store.issue_prepared_study(&selected, missing_prompt, DAY),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert_eq!(
+            store
+                .ready_study_plan_entries(&basis.dataset, head, DAY)
+                .unwrap(),
+            Some(vec![entry])
+        );
+        assert_eq!(
+            store.study_projection_basis(&basis.dataset).unwrap(),
+            epochs
+        );
+
+        assert_eq!(
+            store
+                .issue_prepared_study(&selected, record.clone(), DAY)
+                .unwrap(),
+            PreparedStudyIssue::Issued
+        );
+        record.issued_revision = Some(before.revision);
+        assert_eq!(store.active_resume_state().unwrap().record, Some(record));
     }
 
     #[test]

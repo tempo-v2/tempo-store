@@ -3,7 +3,6 @@ use crate::store_error::invalid;
 use crate::{AssessmentKey, Snapshot, StoreError};
 use tempo_learning::AssessmentSource;
 use tempo_study::AttemptStatus;
-use tempo_types::Grade;
 
 pub(super) fn validate_snapshot(state: &Snapshot) -> Result<(), StoreError> {
     if !state.known_datasets.contains(&state.dataset) {
@@ -59,14 +58,8 @@ pub(super) fn validate_snapshot(state: &Snapshot) -> Result<(), StoreError> {
         }
     }
     for record in state.attempts.values() {
+        record.validate_presentation_state()?;
         let attempt = &record.attempt;
-        if (attempt.status == AttemptStatus::Active) != attempt.prompt.is_some()
-            || (attempt.terminal == Some(Grade::Good) && attempt.status != AttemptStatus::Complete)
-        {
-            return Err(invalid(
-                "attempt presentation and terminal state are inconsistent",
-            ));
-        }
         if record.attempt.terminal.is_some()
             && record.mode == crate::ActivityMode::Test
             && !assessed.contains(&(attempt.dataset.clone(), attempt.id.clone()))
