@@ -562,6 +562,180 @@ mod tests {
     }
 
     #[test]
+    fn prepared_good_persists_after_legacy_work_and_reopens_for_the_next_due_test() {
+        use crate::{
+            AnswerResult, AssessmentKey, AssessmentRecord, Commit, Receipt, ReceiptResult, Store,
+            StudyReceiptLookup, StudyReceiptRead, Write, test_support::issued_record,
+        };
+        use tempo_chess::ExactSequenceGrader;
+        use tempo_learning::{AssessmentInput, AssessmentSource, GameReview};
+        use tempo_types::{Grade, WorkToken};
+
+        let policy = DailyLearning::default();
+        let at = |day: StudyDay| StudyTime {
+            day,
+            unix_ms: day.0 as u64 * 86_400_000,
+        };
+        for repaired_recall in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("study.sqlite");
+            let (mut store, dataset) = fixture(&path);
+            let snapshot = store.snapshot().unwrap();
+            let record = issued_record(&snapshot);
+            let target = record.attempt.target;
+            let version = record.attempt.content_version;
+            let taught = DailyLearning::teach(&LearningState::default(), at(DAY)).unwrap();
+            let day = StudyDay(DAY.0 + 1);
+            let prior = if repaired_recall {
+                let game = AssessmentInput {
+                    grade: Grade::Again,
+                    accepted_at: at(day),
+                    source: AssessmentSource::Game {
+                        source: "pgn".into(),
+                        game_id: "fixture".into(),
+                        played_date: None,
+                        started_at_ms: None,
+                        ended_at_ms: None,
+                    },
+                };
+                let miss =
+                    DailyLearning::assess_game(&policy, &taught, &game, version, None).unwrap();
+                DailyLearning::repair(&miss.state, version, miss.state.miss_revision, at(day))
+                    .unwrap()
+            } else {
+                let mut restored = LearningState {
+                    game_review: Some(GameReview {
+                        answer_version: version,
+                        occurred_by_ms: at(DAY).unix_ms + 1,
+                        actionable_day: day,
+                    }),
+                    ..taught
+                };
+                DailyLearning::restore_portable(&mut restored, version).unwrap();
+                restored
+            };
+            let mut due = prior.due.unwrap().max(if repaired_recall {
+                StudyDay(day.0 + 1)
+            } else {
+                day
+            });
+            store
+                .commit(Commit {
+                    expected_revision: snapshot.revision,
+                    expected_dataset: dataset.clone(),
+                    writes: vec![Write::Learning {
+                        target: target.clone(),
+                        state: prior,
+                    }],
+                })
+                .unwrap();
+
+            for sequence in 1..=2 {
+                let snapshot = store.snapshot().unwrap();
+                let mut record = issued_record(&snapshot);
+                record.attempt.id = format!("prepared-{sequence}").as_str().into();
+                record.issued_at = at(due);
+                record.issued_work = Some(WorkToken {
+                    day: due,
+                    obligation: WorkObligation {
+                        target: target.clone(),
+                        version,
+                        kind: WorkKind::Test,
+                        revision: record.issued_miss_revision,
+                    },
+                });
+                store
+                    .commit(Commit {
+                        expected_revision: snapshot.revision,
+                        expected_dataset: dataset.clone(),
+                        writes: vec![
+                            Write::Issue(record.clone()),
+                            Write::Active(Some(record.attempt.id.clone())),
+                        ],
+                    })
+                    .unwrap();
+                let snapshot = store.snapshot().unwrap();
+                let progress = tempo_study::submit(
+                    &ExactSequenceGrader,
+                    &snapshot.catalog.items[&target].definition,
+                    &record.attempt,
+                    record.attempt.revision,
+                    &"e2e4".into(),
+                )
+                .unwrap();
+                let input = AssessmentInput {
+                    grade: Grade::Good,
+                    accepted_at: at(due),
+                    source: AssessmentSource::Human {
+                        attempt_id: record.attempt.id.clone(),
+                        issued_miss_revision: record.issued_miss_revision,
+                    },
+                };
+                let transition = policy
+                    .assess_prepared_test(
+                        &snapshot.learning[&target],
+                        &input,
+                        version,
+                        record.issued_at,
+                    )
+                    .unwrap();
+                let state = transition.state.clone();
+                assert!(
+                    state.correction.is_none() && state.restored_game_obligation.is_none(),
+                    "{repaired_recall} {sequence} {transition:?}"
+                );
+                let key = AssessmentKey::Human(record.attempt.id.clone());
+                let receipt = Receipt {
+                    id: format!("prepared-receipt-{sequence}").as_str().into(),
+                    command: "exact fixture command".into(),
+                    result: ReceiptResult::Study(AnswerResult {
+                        attempt: progress.attempt.clone(),
+                        feedback: Some(progress.feedback),
+                        assessment: progress.assessment,
+                        learning_effect: Some(transition.effect),
+                    }),
+                };
+                store
+                    .commit(Commit {
+                        expected_revision: snapshot.revision,
+                        expected_dataset: dataset.clone(),
+                        writes: vec![
+                            Write::Progress(crate::StoredAttempt {
+                                attempt: progress.attempt,
+                                ..record
+                            }),
+                            Write::Learning {
+                                target: target.clone(),
+                                state: state.clone(),
+                            },
+                            Write::Assessment(AssessmentRecord {
+                                key,
+                                dataset: dataset.clone(),
+                                target: target.clone(),
+                                content_version: version,
+                                input,
+                                transition,
+                            }),
+                            Write::Receipt(receipt.clone()),
+                            Write::Active(None),
+                        ],
+                    })
+                    .unwrap();
+                drop(store);
+                store = SqliteStore::open(&path).unwrap();
+                assert_eq!(store.snapshot().unwrap().learning[&target], state);
+                let StudyReceiptLookup::Found(replayed) =
+                    store.study_receipt(&dataset, &receipt.id).unwrap()
+                else {
+                    panic!("accepted result unavailable after reopening");
+                };
+                assert_eq!(*replayed, receipt);
+                due = state.due.unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn plan_capture_and_skip_use_the_active_tests_immutable_correction_binding() {
         use crate::{
             AcceptanceKind, ActivityAcceptance, AnswerResult, AssessmentKey, AssessmentRecord,
