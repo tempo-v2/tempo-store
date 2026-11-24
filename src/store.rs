@@ -452,6 +452,19 @@ pub trait Store:
         Err(StoreError::Unsupported("repertoire_reset_generation"))
     }
 
+    /// Apply a prepared manual Games batch without changing Study state.
+    /// The addressed existing receipt wins before the new batch limit is checked.
+    /// Each prepared game may write one row, and the receipt occupies one row
+    /// of the same 128-record transaction budget.
+    fn apply_manual_games(
+        &mut self,
+        _dataset: &DatasetId,
+        _games: &[crate::GameRecord],
+        _receipt: crate::GameReceipt<'_>,
+    ) -> Result<crate::AcceptedGames, StoreError> {
+        Err(StoreError::Unsupported("apply_manual_games"))
+    }
+
     /// Save a game batch at the revision whose repertoire was compared.
     fn commit_games(
         &mut self,

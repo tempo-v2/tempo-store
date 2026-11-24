@@ -859,6 +859,15 @@ impl Store for SqliteStore {
             .map_err(database_error)
     }
 
+    fn apply_manual_games(
+        &mut self,
+        dataset: &DatasetId,
+        games: &[crate::GameRecord],
+        receipt: crate::GameReceipt<'_>,
+    ) -> Result<crate::AcceptedGames, StoreError> {
+        self.save_manual_games(dataset, games, receipt)
+    }
+
     fn commit_games(
         &mut self,
         commit: Commit,
