@@ -1,6 +1,9 @@
 //! Day-local Study authority and the transactional Settings fence.
 
-use super::{next_epoch, projection_state, store_count, work_kind_value};
+use super::{
+    capture::{capture_bound_correction, has_bound_correction},
+    next_epoch, projection_state, store_count, work_kind_value,
+};
 use crate::{
     AcceptanceKind, ActivityMode, ReceiptResult, Snapshot, StoreError, StoredAttempt, StudyScope,
     sqlite_store::{
@@ -273,6 +276,25 @@ pub(in crate::sqlite_store) fn record_issued_skip(
         return Err(invalid("Skip cannot grade or replace the active attempt"));
     }
 
+    // A missed Test can continue as a correction on the same attempt. Its
+    // accepted assessment binds that correction even if Learning has advanced.
+    let correction = if has_bound_correction(work, record.attempt.terminal) {
+        let acceptance = record
+            .acceptance
+            .as_ref()
+            .ok_or_else(|| invalid("missing acceptance for active Study correction"))?;
+        Some(capture_bound_correction(
+            tx,
+            &previous.dataset,
+            &record.attempt.id,
+            work,
+            acceptance,
+        )?)
+    } else {
+        None
+    };
+    let obligation = &correction.as_ref().unwrap_or(work).obligation;
+
     ensure_day(tx, &next.dataset, day)?;
     let ordinal: i64 = tx.query_row(
         "UPDATE study_day_authority SET latest_skip=latest_skip+1
@@ -280,7 +302,6 @@ pub(in crate::sqlite_store) fn record_issued_skip(
         params![next.dataset.0, day.0],
         |row| row.get(0),
     ).map_err(database_error)?;
-    let obligation = &work.obligation;
     tx.execute(
         "INSERT INTO study_deferrals
            (dataset_id,study_day,target_id,version,work_kind,obligation_revision,ordinal)

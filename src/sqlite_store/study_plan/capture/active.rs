@@ -107,7 +107,7 @@ pub(super) fn capture_active(
         return Err(invalid_identity());
     }
     let terminal: Option<Grade> = decode(terminal.as_deref().unwrap_or("null"))?;
-    let correction = if issued.obligation.kind == WorkKind::Test && terminal == Some(Grade::Again) {
+    let correction = if has_bound_correction(&issued, terminal) {
         let acceptance: ActivityAcceptance =
             decode(acceptance.as_deref().ok_or_else(invalid_identity)?)?;
         Some(capture_bound_correction(
@@ -127,7 +127,14 @@ pub(super) fn capture_active(
     })
 }
 
-fn capture_bound_correction(
+pub(in crate::sqlite_store::study_plan) fn has_bound_correction(
+    issued: &WorkToken,
+    terminal: Option<Grade>,
+) -> bool {
+    issued.obligation.kind == WorkKind::Test && terminal == Some(Grade::Again)
+}
+
+pub(in crate::sqlite_store::study_plan) fn capture_bound_correction(
     tx: &Transaction<'_>,
     dataset: &DatasetId,
     id: &AttemptId,

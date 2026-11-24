@@ -2,6 +2,7 @@
 
 mod active;
 pub use active::ActiveStudyWork;
+pub(super) use active::{capture_bound_correction, has_bound_correction};
 
 use super::{StudyDayAuthority, StudyProjectionBasis, authority, projection_state, sqlite_count};
 use crate::sqlite_store::{
@@ -561,10 +562,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_capture_uses_only_the_active_tests_immutable_correction_binding_after_rollover() {
+    fn plan_capture_and_skip_use_the_active_tests_immutable_correction_binding() {
         use crate::{
             AcceptanceKind, ActivityAcceptance, AnswerResult, AssessmentKey, AssessmentRecord,
-            Commit, Receipt, ReceiptResult, Store, Write, test_support::issued_record,
+            Commit, Receipt, ReceiptResult, Store, StudyScope, Write, test_support::issued_record,
         };
         use tempo_chess::ExactSequenceGrader;
         use tempo_learning::{AssessmentInput, AssessmentSource};
@@ -706,10 +707,11 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let mut store = SqliteStore::open(&path).unwrap();
-        store
-            .observe_study_day(&dataset, StudyDay(DAY.0 + 2))
-            .unwrap();
+        let corrupt_path = directory.path().join("capture.sqlite");
+        std::fs::copy(&path, &corrupt_path).unwrap();
+        let mut store = SqliteStore::open(&corrupt_path).unwrap();
+        let skip_day = StudyDay(DAY.0 + 2);
+        store.observe_study_day(&dataset, skip_day).unwrap();
         store.connection.execute(
             "UPDATE attempts SET record=json_set(record,'$.lesson','irrelevant invalid lesson') WHERE id=?1",
             [&attempt_id.0],
@@ -728,19 +730,20 @@ mod tests {
             |store| store.capture_study_plan(&dataset),
         );
         assert!(access.denied.is_empty());
+        let bound = WorkObligation {
+            target,
+            version,
+            kind: WorkKind::Correction,
+            revision: bound_revision,
+        };
         assert_eq!(
             incomplete(result.unwrap()).active_work,
             ActiveStudyWork::Issued {
-                attempt_id,
-                issued,
+                attempt_id: attempt_id.clone(),
+                issued: issued.clone(),
                 correction: Some(WorkToken {
                     day: accepted_at.day,
-                    obligation: WorkObligation {
-                        target,
-                        version,
-                        kind: WorkKind::Correction,
-                        revision: bound_revision
-                    },
+                    obligation: bound.clone(),
                 }),
             }
         );
@@ -752,6 +755,63 @@ mod tests {
             store.capture_study_plan(&dataset).unwrap_err(),
             invalid("missing accepted assessment for active Study correction")
         );
+        drop(store);
+
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.observe_study_day(&dataset, skip_day).unwrap();
+        let before = store.snapshot().unwrap();
+        let record = &before.attempts[&attempt_id];
+        let stopped = tempo_study::abandon(&record.attempt, record.attempt.revision).unwrap();
+        let submission = tempo_types::SubmissionId::from("fixture-correction-skip");
+        store.commit_issued_skip(
+            Commit {
+                expected_revision: before.revision,
+                expected_dataset: dataset.clone(),
+                writes: vec![
+                    Write::Progress(crate::StoredAttempt {
+                        attempt: stopped.clone(),
+                        ..record.clone()
+                    }),
+                    Write::Active(None),
+                    Write::Receipt(Receipt {
+                        id: submission.clone(),
+                        command: "fixture exact Skip command".into(),
+                        result: ReceiptResult::Study(AnswerResult {
+                            attempt: stopped,
+                            feedback: None,
+                            assessment: None,
+                            learning_effect: None,
+                        }),
+                    }),
+                ],
+            },
+            StudyScope {
+                attempt: Some(&attempt_id),
+                submission: Some(&submission),
+                ..StudyScope::default()
+            },
+            skip_day,
+        ).unwrap();
+        drop(store);
+
+        // The next build reads the durable, exact deferral from a new connection.
+        let mut store = SqliteStore::open(&path).unwrap();
+        let captured = |store: &SqliteStore| incomplete(store.capture_study_plan(&dataset).unwrap());
+        let after_skip = captured(&store);
+        assert_eq!(after_skip.active_work, ActiveStudyWork::None);
+        assert_eq!(
+            after_skip.effective_deferrals.unwrap(),
+            vec![DeferredWork { day: skip_day, obligation: bound }],
+        );
+        let rollover = StudyDay(skip_day.0 + 1);
+        store.observe_study_day(&dataset, rollover).unwrap();
+        assert!(captured(&store).effective_deferrals.unwrap().is_empty());
+        store.observe_study_day(&dataset, skip_day).unwrap();
+        store.resume_skipped(&dataset, skip_day, &"resume-correction".into(), skip_day).unwrap();
+        let resumed = captured(&store);
+        assert!(resumed.effective_deferrals.unwrap().is_empty());
+        let authority = resumed.day_authority.unwrap();
+        assert_eq!((authority.latest_skip, authority.skip_cutoff), (1, 1));
     }
 
     #[test]
