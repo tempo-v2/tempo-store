@@ -47,6 +47,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.revealed_decision.is_some()
                 || attempt.status != AttemptStatus::Active
                 || record.issued_miss_revision != learning.miss_revision
+                || !record.has_consistent_work_identity()
             {
                 return Err(invalid("invalid issued attempt"));
             }
@@ -66,6 +67,7 @@ pub(super) fn apply_write(state: &mut Snapshot, write: Write) -> Result<(), Stor
                 || record.issued_at != previous.issued_at
                 || record.issued_revision != previous.issued_revision
                 || record.issued_miss_revision != previous.issued_miss_revision
+                || record.issued_work != previous.issued_work
                 || record.mode != previous.mode
                 || record.route != previous.route
                 || record.first_introduction != previous.first_introduction

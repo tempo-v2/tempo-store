@@ -6,6 +6,16 @@ use tempo_types::{AttemptId, ContentVersion, DatasetId};
 
 impl AddressedResume for SqliteStore {
     fn resume_state(&self, id: &AttemptId) -> Result<ResumeState, StoreError> {
+        self.read_resume_state(Some(id))
+    }
+
+    fn active_resume_state(&self) -> Result<ResumeState, StoreError> {
+        self.read_resume_state(None)
+    }
+}
+
+impl SqliteStore {
+    fn read_resume_state(&self, id: Option<&AttemptId>) -> Result<ResumeState, StoreError> {
         let (dataset, active, record, target) = self
             .connection
             .query_row(
@@ -16,10 +26,10 @@ impl AddressedResume for SqliteStore {
                         EXISTS (SELECT 1 FROM repertoire_suspensions r
                                 WHERE r.dataset_id=s.dataset_id AND r.repertoire_id=c.repertoire)
                  FROM store_state s
-                 LEFT JOIN attempts a ON a.id=?1
+                 LEFT JOIN attempts a ON a.id=coalesce(?1, s.active_attempt_id)
                  LEFT JOIN current_content c ON c.target_id=a.target_id AND c.dataset_id=s.dataset_id
                  WHERE s.singleton=1",
-                [&id.0],
+                [id.map(|id| &id.0)],
                 |row| {
                     let version: Option<Vec<u8>> = row.get(3)?;
                     let target = version
@@ -70,6 +80,9 @@ mod tests {
             test_support::policy().settings(),
         )
         .unwrap();
+        let none = store.active_resume_state().unwrap();
+        assert!(none.active_attempt.is_none());
+        assert!(none.record.is_none());
         let snapshot = store.snapshot().unwrap();
         let issued = test_support::issued_record(&snapshot);
         let id = issued.attempt.id.clone();
@@ -91,25 +104,30 @@ mod tests {
             )
             .unwrap();
 
-        let (result, access) = super::super::operation_probe::probe_access(
-            &mut store,
-            |action| {
-                !matches!(action, AuthAction::Read {
+        for requested in [Some(&id), None] {
+            let (result, access) = super::super::operation_probe::probe_access(
+                &mut store,
+                |action| {
+                    !matches!(action, AuthAction::Read {
                 table_name: "store_state" | "attempts" | "current_content" | "study_exclusions" |
                     "repertoire_suspensions",
                 column_name,
             } if column_name != "policy")
-            },
-            |store| store.resume_state(&id),
-        );
-        let state = result.unwrap();
-        assert!(access.denied.is_empty());
-        assert_eq!(state.active_attempt.as_ref(), Some(&id));
-        assert_eq!(state.record.as_ref(), Some(&issued));
-        assert_eq!(
-            state.target.unwrap().version,
-            issued.attempt.content_version
-        );
+                },
+                |store| match requested {
+                    Some(id) => store.resume_state(id),
+                    None => store.active_resume_state(),
+                },
+            );
+            let state = result.unwrap();
+            assert!(access.denied.is_empty());
+            assert_eq!(state.active_attempt.as_ref(), Some(&id));
+            assert_eq!(state.record.as_ref(), Some(&issued));
+            assert_eq!(
+                state.target.unwrap().version,
+                issued.attempt.content_version
+            );
+        }
         assert!(
             store
                 .resume_state(&"missing".into())

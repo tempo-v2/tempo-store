@@ -1,13 +1,16 @@
 //! Day-local Study authority and the transactional Settings fence.
 
-use super::{next_epoch, projection_state, store_count};
+use super::{
+    capture::{capture_bound_correction, has_bound_correction},
+    next_epoch, projection_state, store_count, work_kind_value,
+};
 use crate::{
-    AcceptanceKind, ActivityMode, ReceiptResult, Snapshot, StoreError, StoredAttempt,
+    AcceptanceKind, ActivityMode, ReceiptResult, Snapshot, StoreError, StoredAttempt, StudyScope,
     sqlite_store::{
         SqliteStore, database_error,
         row_values::{decode, receipt_value},
     },
-    store_error::conflict,
+    store_error::{conflict, invalid},
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -140,27 +143,27 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
     previous: &Snapshot,
     next: &Snapshot,
     submission: Option<&SubmissionId>,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let Some(submission) = submission.filter(|id| !previous.receipts.contains_key(*id)) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(ReceiptResult::Study(result)) =
         next.receipts.get(submission).map(|receipt| &receipt.result)
     else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(record) = next.attempts.get(&result.attempt.id) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(acceptance) = &record.acceptance else {
-        return Ok(());
+        return Ok(false);
     };
     if record.mode != ActivityMode::Teach
         || !record.first_introduction
         || record.attempt.status != AttemptStatus::Complete
         || acceptance.kind != AcceptanceKind::Teaching
     {
-        return Ok(());
+        return Ok(false);
     }
 
     let target = &record.attempt.target;
@@ -171,7 +174,7 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
         state.first_introduced == Some(day) && state.taught_at == Some(acceptance.at)
     });
     if !applied_first_teach {
-        return Ok(());
+        return Ok(false);
     }
 
     // The repertoire owner is indexed with the current content version and
@@ -193,14 +196,129 @@ pub(in crate::sqlite_store) fn record_accepted_first_teach(
          WHERE dataset_id=?1 AND study_day=?2",
         params![next.dataset.0, day.0, i64::from(opening), i64::from(!opening)],
     ).map_err(database_error)?;
-    // A missing projection state is recreated dirty. Plan and summary heads
-    // are never read by this acceptance path.
+    Ok(true)
+}
+
+pub(in crate::sqlite_store) fn mark_acceptance_projections_dirty(tx: &Transaction<'_>, dataset: &DatasetId) -> Result<(), StoreError> {
+    // There need not be any prepared generation or summary. If projection
+    // state itself is missing, record a new dirty marker for this dataset.
     tx.execute(
         "INSERT INTO study_projection_state(dataset_id) VALUES (?1)
          ON CONFLICT(dataset_id) DO NOTHING",
-        [&next.dataset.0],
+        [&dataset.0],
     ).map_err(database_error)?;
-    invalidate_membership(tx, &next.dataset)
+    invalidate_membership(tx, dataset)
+}
+
+/// A scoped acceptance can change the active slot, the current correction,
+/// or the saved ordinary availability. Compare only facts the capture uses.
+pub(in crate::sqlite_store) fn acceptance_changes_basis(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+    scope: StudyScope<'_>,
+) -> Result<bool, StoreError> {
+    if previous.active_attempt != next.active_attempt {
+        return Ok(true);
+    }
+    let Some(submission) = scope.submission.filter(|id| !previous.receipts.contains_key(*id)) else {
+        return Ok(false);
+    };
+    let Some(ReceiptResult::Study(result)) =
+        next.receipts.get(submission).map(|receipt| &receipt.result)
+    else {
+        return Ok(false);
+    };
+    let target = &result.attempt.target;
+    let prior = previous.learning.get(target);
+    let current = next.learning.get(target);
+    if prior == current {
+        return Ok(false);
+    }
+    let Some(day) = projection_state(tx, &next.dataset)?.and_then(|state| state.day) else {
+        return Ok(true);
+    };
+    let version = result.attempt.content_version;
+    Ok(prior.map(|state| (state.miss_revision, state.prepared_availability(version, day)))
+        != current.map(|state| (state.miss_revision, state.prepared_availability(version, day))))
+}
+
+/// Record a newly accepted Skip of an exact issued obligation. A later Skip of
+/// the same obligation after Resume Skipped receives a newer day-local ordinal.
+pub(in crate::sqlite_store) fn record_issued_skip(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+    scope: StudyScope<'_>,
+    day: StudyDay,
+) -> Result<(), StoreError> {
+    let record = scope.attempt
+        .filter(|id| previous.active_attempt.as_ref() == Some(*id))
+        .and_then(|id| previous.attempts.get(id))
+        .ok_or_else(|| invalid("Skip must address the active attempt"))?;
+    let work = record.issued_work.as_ref()
+        .ok_or_else(|| invalid("Skip requires an exact issued obligation"))?;
+    let result = scope.submission
+        .filter(|id| !previous.receipts.contains_key(*id))
+        .and_then(|id| next.receipts.get(id))
+        .and_then(|receipt| match &receipt.result {
+            ReceiptResult::Study(result) => Some(result),
+            _ => None,
+        })
+        .ok_or_else(|| invalid("Skip requires its exact new Study receipt"))?;
+    if result.attempt.id != record.attempt.id
+        || result.attempt.status != AttemptStatus::Abandoned
+        || result.assessment.is_some()
+        || result.learning_effect.is_some()
+        || next.active_attempt.is_some()
+        || previous.learning != next.learning
+    {
+        return Err(invalid("Skip cannot grade or replace the active attempt"));
+    }
+
+    // A missed Test can continue as a correction on the same attempt. Its
+    // accepted assessment binds that correction even if Learning has advanced.
+    let correction = if has_bound_correction(work, record.attempt.terminal) {
+        let acceptance = record
+            .acceptance
+            .as_ref()
+            .ok_or_else(|| invalid("missing acceptance for active Study correction"))?;
+        Some(capture_bound_correction(
+            tx,
+            &previous.dataset,
+            &record.attempt.id,
+            work,
+            acceptance,
+        )?)
+    } else {
+        None
+    };
+    let obligation = &correction.as_ref().unwrap_or(work).obligation;
+
+    ensure_day(tx, &next.dataset, day)?;
+    let ordinal: i64 = tx.query_row(
+        "UPDATE study_day_authority SET latest_skip=latest_skip+1
+         WHERE dataset_id=?1 AND study_day=?2 RETURNING latest_skip",
+        params![next.dataset.0, day.0],
+        |row| row.get(0),
+    ).map_err(database_error)?;
+    tx.execute(
+        "INSERT INTO study_deferrals
+           (dataset_id,study_day,target_id,version,work_kind,obligation_revision,ordinal)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(dataset_id,study_day,target_id,version,work_kind,obligation_revision)
+         DO UPDATE SET ordinal=excluded.ordinal",
+        params![
+            next.dataset.0,
+            day.0,
+            obligation.target.0,
+            obligation.version.0.to_be_bytes().as_slice(),
+            work_kind_value(obligation.kind),
+            obligation.revision.0.to_be_bytes().as_slice(),
+            ordinal,
+        ],
+    ).map_err(database_error)?;
+    Ok(())
 }
 
 pub(in crate::sqlite_store) fn migrate_authority(tx: &Transaction<'_>) -> Result<(), StoreError> {
@@ -589,4 +707,44 @@ mod tests {
             assert_eq!(authority(&store), migrated);
         }
     }
+
+    #[test]
+    fn accepted_legacy_test_fences_the_basis_once_and_keeps_its_receipt() {
+        use crate::{Commit, Write, test_support::successful_answer_writes};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut store, dataset) = create(&directory.path().join("study.sqlite"));
+        let initial = store.snapshot().unwrap();
+        let issued = issued_record(&initial);
+        let id = issued.attempt.id.clone();
+        store
+            .commit(Commit {
+                expected_dataset: dataset.clone(),
+                expected_revision: initial.revision,
+                writes: vec![Write::Issue(issued), Write::Active(Some(id.clone()))],
+            })
+            .unwrap();
+        let before = store.observe_study_day(&dataset, StudyDay(10)).unwrap().unwrap();
+        let scoped = store.snapshot().unwrap();
+        let command = "submission-1".into();
+        store
+            .commit_study(
+                Commit {
+                    expected_dataset: dataset.clone(),
+                    expected_revision: scoped.revision,
+                    writes: successful_answer_writes(&scoped),
+                },
+                StudyScope {
+                    attempt: Some(&id),
+                    submission: Some(&command),
+                    ..StudyScope::default()
+                },
+            )
+            .unwrap();
+        let after = store.study_projection_basis(&dataset).unwrap().unwrap();
+        assert_eq!(after.plan.membership_epoch.0, before.plan.membership_epoch.0 + 1);
+        assert_eq!(after.summary.epoch.0, before.summary.epoch.0 + 1);
+        assert!(after.summary_dirty);
+        assert!(store.snapshot().unwrap().receipts.contains_key(&command));
+    }
+
 }

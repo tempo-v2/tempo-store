@@ -2,7 +2,6 @@
 
 use crate::{Commit, ContentState, Receipt, Snapshot, StoreError, StoredAttempt, StudyState};
 use tempo_chess::ContentItem;
-use tempo_learning::LearningState;
 use tempo_types::{
     AttemptId, ContentVersion, DatasetId, Grade, Revision, StudyDay, SubmissionId, TargetId,
 };
@@ -62,15 +61,14 @@ pub struct RepertoireDocument {
     pub item: Option<ContentItem>,
     pub pgn: Option<String>,
     pub source_id: Option<String>,
-    pub model_authority: crate::ModelAuthority,
 }
 
-/// The same command may be delivered again without changing newer learning.
-pub enum RepertoireReset {
-    Applied(Vec<TargetId>),
+/// Read-only settlement of a reset from an earlier release.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PriorRepertoireReset {
     Replayed,
+    NotAccepted,
     StaleDataset,
-    UnknownRepertoire,
     CommandConflict,
 }
 
@@ -228,6 +226,22 @@ pub trait Store:
         Err(StoreError::Unsupported("tactical_observations"))
     }
 
+    /// Read the committed local Study profile.
+    fn local_profile(&self) -> Result<Option<String>, StoreError> {
+        Err(StoreError::Unsupported("local_profile"))
+    }
+
+    /// Save validated Settings through the same Store that owns Study writes.
+    fn update_study_profile_for_plan(
+        &mut self,
+        _dataset: &DatasetId,
+        _expected: &str,
+        _replacement: &str,
+        _effect: crate::StudyProfilePlanEffect,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("update_study_profile_for_plan"))
+    }
+
     /// Read a consistent owned view without changing stored state.
     fn snapshot(&self) -> Result<Snapshot, StoreError>;
     /// Read current study state with only the referenced outcome/receipt.
@@ -242,6 +256,17 @@ pub trait Store:
         _scope: StudyScope<'_>,
     ) -> Result<Revision, StoreError> {
         self.commit(commit)
+    }
+
+    /// Commit an addressed Skip and its exact acceptance-day deferral together.
+    /// The attempt's persisted issued identity supplies the obligation.
+    fn commit_issued_skip(
+        &mut self,
+        _commit: Commit,
+        _scope: StudyScope<'_>,
+        _day: StudyDay,
+    ) -> Result<Revision, StoreError> {
+        Err(StoreError::Unsupported("commit_issued_skip"))
     }
 
     /// Read up to 31 saved positions in reverse insertion order, before an optional cursor.
@@ -349,16 +374,14 @@ pub trait Store:
         Err(StoreError::Unsupported("set_repertoire_activity"))
     }
 
-    /// Clear one repertoire's Study records and publish its reset receipt atomically.
-    fn reset_repertoire(
-        &mut self,
+    /// Resolve the immutable identity of a previously accepted repertoire reset.
+    fn accepted_repertoire_reset(
+        &self,
         _dataset: &DatasetId,
         _repertoire: &str,
         _command_id: &str,
-        _at_ms: u64,
-        _fresh: &LearningState,
-    ) -> Result<RepertoireReset, StoreError> {
-        Err(StoreError::Unsupported("reset_repertoire"))
+    ) -> Result<PriorRepertoireReset, StoreError> {
+        Err(StoreError::Unsupported("accepted_repertoire_reset"))
     }
 
     /// Latest reset whose evidence boundary applies to this repertoire.
@@ -427,6 +450,19 @@ pub trait Store:
         _repertoire: &str,
     ) -> Result<u64, StoreError> {
         Err(StoreError::Unsupported("repertoire_reset_generation"))
+    }
+
+    /// Apply a prepared manual Games batch without changing Study state.
+    /// The addressed existing receipt wins before the new batch limit is checked.
+    /// Each prepared game may write one row, and the receipt occupies one row
+    /// of the same 128-record transaction budget.
+    fn apply_manual_games(
+        &mut self,
+        _dataset: &DatasetId,
+        _games: &[crate::GameRecord],
+        _receipt: crate::GameReceipt<'_>,
+    ) -> Result<crate::AcceptedGames, StoreError> {
+        Err(StoreError::Unsupported("apply_manual_games"))
     }
 
     /// Save a game batch at the revision whose repertoire was compared.
@@ -697,22 +733,6 @@ pub trait Store:
         _dataset: &DatasetId,
     ) -> Result<Option<crate::ProjectionStatus>, StoreError> {
         Err(StoreError::Unsupported("game_model_projection_status"))
-    }
-
-    fn model_bootstrap_repertoires(&self, _dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
-        Err(StoreError::Unsupported("model_bootstrap_repertoires"))
-    }
-
-    /// Accept one legacy source verification only while the original source is current.
-    fn finish_model_bootstrap(
-        &mut self,
-        _dataset: &DatasetId,
-        _content_revision: Revision,
-        _repertoire: &str,
-        _source_id: &str,
-        _stamp: Option<&crate::ModelInputStamp>,
-    ) -> Result<(), StoreError> {
-        Err(StoreError::Unsupported("finish_model_bootstrap"))
     }
 
     /// Page through the newest comparison for each game and learner at a fixed

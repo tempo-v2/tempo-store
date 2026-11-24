@@ -469,3 +469,58 @@ fn plan_generation_storage_schema24_keeps_previous_schema_authority() {
         .unwrap();
     assert_eq!(invalid, 0);
 }
+
+#[test]
+fn calendar_observation_fences_mismatched_profiles_and_rollover() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("calendar.sqlite");
+    let dataset: DatasetId = "calendar".into();
+    let before = r#"{"study_timezone":"America/New_York"}"#;
+    let after = r#"{"study_timezone":"Europe/London"}"#;
+    let mut store = SqliteStore::create_with_profile(
+        &path,
+        dataset.clone(),
+        demo_catalog(),
+        DailyLearning::default().settings(),
+        Some(before),
+    )
+    .unwrap();
+    let observed = store
+        .observe_study_calendar_day(&dataset, "America/New_York", StudyDay(20))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .observe_study_calendar_day(&dataset, "America/New_York", StudyDay(20))
+            .unwrap(),
+        Some(observed),
+    );
+
+    let settings = SqliteStore::open(&path).unwrap();
+    settings
+        .update_study_profile_for_plan(
+            &dataset,
+            before,
+            after,
+            StudyProfilePlanEffect::InvalidateMembership,
+        )
+        .unwrap();
+    let fenced = store.study_projection_basis(&dataset).unwrap();
+    assert_eq!(
+        store
+            .observe_study_calendar_day(&dataset, "America/New_York", StudyDay(21))
+            .unwrap(),
+        None,
+    );
+    assert_eq!(store.study_projection_basis(&dataset).unwrap(), fenced);
+
+    let rolled = store
+        .observe_study_calendar_day(&dataset, "Europe/London", StudyDay(21))
+        .unwrap()
+        .unwrap();
+    assert_eq!(rolled.plan.day, StudyDay(21));
+    assert_eq!(rolled.summary.day, StudyDay(21));
+    let fenced = fenced.unwrap();
+    assert!(rolled.plan.membership_epoch.0 > fenced.plan.membership_epoch.0);
+    assert!(rolled.summary.epoch.0 > fenced.summary.epoch.0);
+}

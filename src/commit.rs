@@ -94,6 +94,7 @@ mod tests {
             },
             issued_revision: Some(initial.revision),
             issued_miss_revision: initial.learning[&target].miss_revision,
+            issued_work: None,
             mode: crate::ActivityMode::Test,
             route: None,
             first_introduction: false,

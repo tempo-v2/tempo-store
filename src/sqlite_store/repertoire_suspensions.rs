@@ -1,6 +1,6 @@
 //! Persist repertoire participation and any accompanying Study write atomically.
 
-use super::{database_error, load_study, row_values, save_snapshot::save_snapshot};
+use super::{database_error, load_study, row_values, save_snapshot::save_snapshot, study_plan};
 use crate::{
     ChessAttempt, Commit, RepertoireActivity, RepertoireActivityCommand, RepertoireActivityRead,
     RepertoireActivityResult, StoreError, StudyScope, StudyState, Write,
@@ -177,6 +177,7 @@ pub(super) fn apply(
             [&command.dataset.0],
         )
         .map_err(database_error)?;
+        study_plan::mark_content_projections_dirty(&tx, command.dataset)?;
     }
     tx.execute(
         "INSERT INTO content_receipts VALUES (?1,?2)",

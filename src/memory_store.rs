@@ -56,7 +56,17 @@ impl DatasetIdentity for MemoryStore {
 
 impl crate::AddressedResume for MemoryStore {
     fn resume_state(&self, id: &AttemptId) -> Result<crate::ResumeState, StoreError> {
-        let record = self.state.attempts.get(id);
+        self.read_resume_state(Some(id))
+    }
+
+    fn active_resume_state(&self) -> Result<crate::ResumeState, StoreError> {
+        self.read_resume_state(self.state.active_attempt.as_ref())
+    }
+}
+
+impl MemoryStore {
+    fn read_resume_state(&self, id: Option<&AttemptId>) -> Result<crate::ResumeState, StoreError> {
+        let record = id.and_then(|id| self.state.attempts.get(id));
         let target = record
             .and_then(|record| self.state.catalog.items.get(&record.attempt.target))
             .map(|item| crate::ResumeTarget {

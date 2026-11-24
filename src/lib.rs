@@ -52,13 +52,16 @@ pub use repertoire_activity::{
 pub use repertoire_run::{RepertoireRun, RepertoireRunStep};
 pub use snapshot::Snapshot;
 pub use sqlite_store::{
-    PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, SqliteStore,
-    StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts,
-    StudyProfilePlanEffect, StudyProjectionBasis, TacticPayoffPublication,
+    ActiveStudyWork, PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult,
+    PreparedStudyCandidate, PreparedStudyIssue, PreparedStudyNext,
+    ResumeSkippedOutcome, SqliteStore, StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts,
+    StudyPlanTargetFacts,
+    StudyProfileFacts, StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
+    TacticPayoffPublication,
 };
 pub use store::{
     ContentReceipt, ContentSource, DatasetIdentity, RepertoireDocument, RepertoirePartition,
-    RepertoireReset, Store,
+    PriorRepertoireReset, Store,
     StudyOrderingWrite, StudyScope,
 };
 pub use store_error::StoreError;
@@ -74,7 +77,7 @@ pub use write::Write;
 
 mod game_model;
 pub use game_model::{
-    BookProjection, ModelAuthority, ModelInputStamp, ModelTargets, ProjectionBook, ProjectionScope,
+    BookProjection, ModelInputStamp, ModelTargets, ProjectionBook, ProjectionScope,
     ProjectionStatus, REACH_MODEL_KEY, model_lines, model_targets,
 };
 mod game_evidence;
@@ -108,3 +111,5 @@ mod coverage;
 pub use coverage::{
     CoverageEditBasis, CoverageLineSetting, CoverageSummary, ForecastGap, SavedCoverage,
 };
+
+pub use sqlite_store::{PublishStudySummary, StudyFamilySummary, StudySummary, StudySummaryRead};

@@ -1,0 +1,19 @@
+-- Retain the archived counter and its source data. No runtime owns this report.
+DROP TRIGGER IF EXISTS tactical_report_games_insert;
+DROP TRIGGER IF EXISTS tactical_report_games_update;
+DROP TRIGGER IF EXISTS tactical_report_games_delete;
+DROP TRIGGER IF EXISTS tactical_report_game_comparisons_insert;
+DROP TRIGGER IF EXISTS tactical_report_game_comparisons_update;
+DROP TRIGGER IF EXISTS tactical_report_game_comparisons_delete;
+DROP TRIGGER IF EXISTS tactical_report_tactical_observations_insert;
+DROP TRIGGER IF EXISTS tactical_report_tactical_observations_update;
+DROP TRIGGER IF EXISTS tactical_report_tactical_observations_delete;
+DROP TRIGGER IF EXISTS tactical_report_tactical_analyses_insert;
+DROP TRIGGER IF EXISTS tactical_report_tactical_analyses_update;
+DROP TRIGGER IF EXISTS tactical_report_tactical_analyses_delete;
+DROP TRIGGER IF EXISTS tactical_report_tactical_positions_insert;
+DROP TRIGGER IF EXISTS tactical_report_tactical_positions_update;
+DROP TRIGGER IF EXISTS tactical_report_tactical_positions_delete;
+DROP TRIGGER IF EXISTS tactical_report_tactical_enrollment_insert;
+DROP TRIGGER IF EXISTS tactical_report_tactical_enrollment_update;
+DROP TRIGGER IF EXISTS tactical_report_tactical_enrollment_delete;

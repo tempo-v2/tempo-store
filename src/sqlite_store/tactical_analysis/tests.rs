@@ -135,6 +135,7 @@ fn issue_request(store: &mut SqliteStore, request: &TacticalRequest, name: &str)
         },
         issued_revision: Some(snapshot.revision),
         issued_miss_revision: snapshot.learning[&request.target].miss_revision,
+        issued_work: None,
         mode: ActivityMode::Practice,
         route: None,
         first_introduction: false,
@@ -1597,8 +1598,7 @@ fn tactical_acceptance_work_stays_addressed_as_unrelated_state_grows() {
             .into()
         );
         let amended_epoch = store.tactical_report_generation(&basis.dataset).unwrap();
-        assert!(amended_epoch.evidence > report_epoch.evidence);
-        assert_eq!(amended_epoch.archive, report_epoch.archive);
+        assert_eq!(amended_epoch, report_epoch);
 
         store
             .connection

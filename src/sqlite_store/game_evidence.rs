@@ -498,6 +498,53 @@ fn validate_game_transitions(
 }
 
 impl SqliteStore {
+    pub(super) fn save_manual_games(
+        &mut self,
+        dataset: &DatasetId,
+        games: &[crate::GameRecord],
+        receipt: GameReceipt<'_>,
+    ) -> Result<AcceptedGames, StoreError> {
+        const MAX_WRITTEN_RECORDS: usize = 128;
+        let _diagnostic =
+            crate::diagnostics::Operation::new("sqlite.game_evidence.save_manual_games");
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let active_dataset: String = transaction
+            .query_row(
+                "SELECT dataset_id FROM store_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if active_dataset != dataset.0 {
+            return Err(conflict("the active dataset changed"));
+        }
+        if let Some(accepted) =
+            read_receipt(&transaction, dataset, receipt.id, receipt.fingerprint)?
+        {
+            return Ok(accepted);
+        }
+        if games.len() >= MAX_WRITTEN_RECORDS {
+            return Err(invalid("manual Games import exceeds the 128-record budget"));
+        }
+
+        let mut counts = GameCommit::default();
+        for game in games {
+            let inserted = save_game_record(&transaction, &dataset.0, game, GameTiming::Merge)?;
+            counts.new_games += inserted;
+            counts.duplicates += 1 - inserted;
+        }
+        let accepted = AcceptedGames {
+            counts,
+            report: receipt.report.into(),
+        };
+        save_game_receipt(&transaction, &dataset.0, receipt, &accepted)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(accepted)
+    }
+
     pub(super) fn save_game_evidence(
         &mut self,
         commit: Commit,
@@ -552,77 +599,7 @@ impl SqliteStore {
                 )?;
             }
             game_choices::validate_new(&transaction, &previous, entry)?;
-            let raw = transaction
-                .execute(
-                    "INSERT INTO games VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-                 ON CONFLICT(dataset_id,source,id) DO NOTHING",
-                    params![
-                        dataset,
-                        game.source,
-                        game.id,
-                        game.url,
-                        game.white,
-                        game.black,
-                        game.start_ms,
-                        game.end_ms,
-                        game.fetched_ms,
-                        game.pgn,
-                        game.mainline_signature,
-                        game.played_date_ms
-                    ],
-                )
-                .map_err(database_error)?;
-            if raw == 1 {
-                super::tactical_analysis::enroll(
-                    &transaction,
-                    &previous.dataset,
-                    &game.source,
-                    &game.id,
-                    &entry.summary.learner,
-                    true,
-                )?;
-            }
-            if raw == 0
-                && let Some(timing) = game.precise_pgn_timing()
-            {
-                let mut current = read_pgn_timing(&transaction, dataset, &game.id)?
-                    .ok_or_else(|| conflict("the stored PGN start time does not match"))?;
-                let previous_end = current.end_ms;
-                current.merge_end(&timing)?;
-                if current.end_ms != timing.end_ms {
-                    return Err(conflict(
-                        "PGN timing changed during comparison; retry the command",
-                    ));
-                }
-                if previous_end != current.end_ms {
-                    transaction.execute(
-                        "UPDATE games SET end_ms=?3 WHERE dataset_id=?1 AND source='pgn' AND id=?2",
-                        params![dataset, game.id, current.end_ms],
-                    ).map_err(database_error)?;
-                }
-            } else if raw == 0 {
-                let same: bool = transaction
-                    .query_row(
-                        "SELECT (mainline_signature IS NULL OR mainline_signature=?4)
-                         AND start_ms IS ?5 AND end_ms IS ?6
-                     FROM games WHERE dataset_id=?1 AND source=?2 AND id=?3",
-                        params![
-                            dataset,
-                            game.source,
-                            game.id,
-                            game.mainline_signature,
-                            game.start_ms,
-                            game.end_ms
-                        ],
-                        |row| row.get(0),
-                    )
-                    .map_err(database_error)?;
-                if !same {
-                    return Err(conflict(
-                        "a source game identity was delivered with different game facts",
-                    ));
-                }
-            }
+            let raw = save_game_record(&transaction, dataset, game, GameTiming::Compared)?;
             result.new_games += raw;
             result.duplicates += 1 - raw;
             if let Some(choice) = &entry.resolved_choice {
@@ -712,23 +689,10 @@ impl SqliteStore {
             super::game_relevance::rebuild(&transaction, dataset)?;
         }
         let accepted = AcceptedGames {
-            counts: GameCommit {
-                new_games: result.new_games,
-                duplicates: result.duplicates,
-            },
+            counts: result,
             report: receipt.report.into(),
         };
-        transaction
-            .execute(
-                "INSERT INTO game_receipts VALUES (?1,?2,?3,?4)",
-                params![
-                    dataset,
-                    receipt.id,
-                    receipt.fingerprint,
-                    row_values::encode(&accepted)?
-                ],
-            )
-            .map_err(database_error)?;
+        save_game_receipt(&transaction, dataset, receipt, &accepted)?;
         crate::diagnostics::timed("sqlite.commit", || transaction.commit())
             .map_err(database_error)?;
         Ok(accepted)
@@ -955,6 +919,105 @@ pub(super) fn read_pgn_timing(
         .map_err(database_error)
 }
 
+enum GameTiming {
+    /// A manual import can omit an end already verified in Store.
+    Merge,
+    /// Legacy comparison evidence was prepared against the merged end.
+    Compared,
+}
+
+fn save_game_record(
+    transaction: &Transaction<'_>,
+    dataset: &str,
+    game: &crate::GameRecord,
+    timing_policy: GameTiming,
+) -> Result<usize, StoreError> {
+    let raw = transaction
+        .execute(
+            "INSERT INTO games VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+         ON CONFLICT(dataset_id,source,id) DO NOTHING",
+            params![
+                dataset,
+                game.source,
+                game.id,
+                game.url,
+                game.white,
+                game.black,
+                game.start_ms,
+                game.end_ms,
+                game.fetched_ms,
+                game.pgn,
+                game.mainline_signature,
+                game.played_date_ms
+            ],
+        )
+        .map_err(database_error)?;
+    if raw == 0
+        && let Some(timing) = game.precise_pgn_timing()
+    {
+        let mut current = read_pgn_timing(transaction, dataset, &game.id)?
+            .ok_or_else(|| conflict("the stored PGN start time does not match"))?;
+        let previous_end = current.end_ms;
+        current.merge_end(&timing)?;
+        if matches!(timing_policy, GameTiming::Compared) && current.end_ms != timing.end_ms {
+            return Err(conflict(
+                "PGN timing changed during comparison; retry the command",
+            ));
+        }
+        if previous_end != current.end_ms {
+            transaction
+                .execute(
+                    "UPDATE games SET end_ms=?3 WHERE dataset_id=?1 AND source='pgn' AND id=?2",
+                    params![dataset, game.id, current.end_ms],
+                )
+                .map_err(database_error)?;
+        }
+    } else if raw == 0 {
+        let same: bool = transaction
+            .query_row(
+                "SELECT (mainline_signature IS NULL OR mainline_signature=?4)
+                 AND start_ms IS ?5 AND end_ms IS ?6
+             FROM games WHERE dataset_id=?1 AND source=?2 AND id=?3",
+                params![
+                    dataset,
+                    game.source,
+                    game.id,
+                    game.mainline_signature,
+                    game.start_ms,
+                    game.end_ms
+                ],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if !same {
+            return Err(conflict(
+                "a source game identity was delivered with different game facts",
+            ));
+        }
+    }
+    Ok(raw)
+}
+
+fn save_game_receipt(
+    transaction: &Transaction<'_>,
+    dataset: &str,
+    receipt: GameReceipt<'_>,
+    accepted: &AcceptedGames,
+) -> Result<(), StoreError> {
+    transaction
+        .execute(
+            "INSERT INTO game_receipts VALUES (?1,?2,?3,?4)",
+            params![
+                dataset,
+                receipt.id,
+                receipt.fingerprint,
+                row_values::encode(accepted)?
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
 fn read_receipt(
     connection: &Connection,
     dataset: &DatasetId,
@@ -1023,6 +1086,253 @@ mod tests {
             },
             observations: vec![],
         }
+    }
+
+    #[test]
+    fn manual_import_is_bounded_and_replays_with_only_addressed_reads() {
+        use super::super::operation_probe::probe_access;
+        use rusqlite::hooks::AuthAction;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manual.sqlite");
+        let dataset: DatasetId = "manual".into();
+        let mut store = SqliteStore::create(
+            &path,
+            dataset.clone(),
+            tempo_chess::demo_catalog(),
+            tempo_learning::DailyLearning::default().settings(),
+        )
+        .unwrap();
+        let games: Vec<_> = (0..128)
+            .map(|index| comparison(&format!("game-{index}"), None).game)
+            .collect();
+        let receipt = |id| GameReceipt {
+            id,
+            fingerprint: "fingerprint",
+            report: "accepted report",
+        };
+        let (result, access) = probe_access(
+            &mut store,
+            |action| match action {
+                AuthAction::Read {
+                    table_name,
+                    column_name,
+                } => match table_name {
+                    "store_state" => !matches!(column_name, "dataset_id" | "singleton"),
+                    "datasets" | "games" | "game_receipts" => false,
+                    _ => true,
+                },
+                AuthAction::Insert { table_name } | AuthAction::Update { table_name, .. } => {
+                    !matches!(table_name, "games" | "game_receipts")
+                }
+                AuthAction::Delete { .. } => true,
+                _ => false,
+            },
+            |store| store.apply_manual_games(&dataset, &games[..127], receipt("accepted")),
+        );
+        assert!(access.denied.is_empty(), "{:?}", access.denied);
+        assert_eq!(result.unwrap().counts.new_games, 127);
+        assert!(matches!(
+            store.apply_manual_games(&dataset, &games, receipt("over-budget")),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(
+            store
+                .game_receipt(&dataset, "over-budget", "fingerprint")
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+
+        let mut store = SqliteStore::open(&path).unwrap();
+        let (result, access) = probe_access(
+            &mut store,
+            |action| match action {
+                AuthAction::Read { table_name, .. } => {
+                    !matches!(table_name, "store_state" | "game_receipts")
+                }
+                AuthAction::Insert { .. }
+                | AuthAction::Update { .. }
+                | AuthAction::Delete { .. } => true,
+                _ => false,
+            },
+            |store| store.apply_manual_games(&dataset, &games, receipt("accepted")),
+        );
+        assert!(access.denied.is_empty(), "{:?}", access.denied);
+        let replay = result.unwrap();
+        assert_eq!(replay.counts.new_games, 127);
+        assert_eq!(replay.report, "accepted report");
+        assert!(matches!(
+            store.apply_manual_games(
+                &dataset,
+                &[],
+                GameReceipt {
+                    fingerprint: "changed",
+                    ..receipt("accepted")
+                }
+            ),
+            Err(StoreError::Conflict(_))
+        ));
+        let before = store.snapshot().unwrap();
+        assert!(matches!(
+            store.apply_manual_games(&DatasetId::from("stale"), &games, receipt("accepted")),
+            Err(StoreError::Conflict(_))
+        ));
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM games", [], |row| row
+                    .get::<_, usize>(0))
+                .unwrap(),
+            127
+        );
+    }
+
+    #[test]
+    fn manual_import_rolls_back_new_games_and_timing_on_late_receipt_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset: DatasetId = "manual".into();
+        let mut store = SqliteStore::create(
+            dir.path().join("manual.sqlite"),
+            dataset.clone(),
+            tempo_chess::demo_catalog(),
+            tempo_learning::DailyLearning::default().settings(),
+        )
+        .unwrap();
+        let receipt = |id| GameReceipt {
+            id,
+            fingerprint: "fingerprint",
+            report: "report",
+        };
+        store
+            .apply_manual_games(
+                &dataset,
+                &[comparison("existing", None).game],
+                receipt("first"),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_receipt BEFORE INSERT ON game_receipts
+             BEGIN SELECT RAISE(ABORT, 'fixture rejects receipt'); END;",
+            )
+            .unwrap();
+        let games = [
+            comparison("existing", Some(150)).game,
+            comparison("new", None).game,
+        ];
+        let before = store.snapshot().unwrap();
+        assert!(
+            store
+                .apply_manual_games(&dataset, &games, receipt("next"))
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert_eq!(
+            store
+                .pgn_timing(&dataset, "existing")
+                .unwrap()
+                .unwrap()
+                .end_ms,
+            None
+        );
+        assert!(store.pgn_timing(&dataset, "new").unwrap().is_none());
+        assert!(
+            store
+                .game_receipt(&dataset, "next", "fingerprint")
+                .unwrap()
+                .is_none()
+        );
+
+        store
+            .connection
+            .execute_batch("DROP TRIGGER reject_receipt")
+            .unwrap();
+        let accepted = store
+            .apply_manual_games(&dataset, &games, receipt("next"))
+            .unwrap();
+        assert_eq!(accepted.counts.new_games, 1);
+        assert_eq!(accepted.counts.duplicates, 1);
+        assert_eq!(
+            store
+                .pgn_timing(&dataset, "existing")
+                .unwrap()
+                .unwrap()
+                .end_ms,
+            Some(150)
+        );
+        assert!(store.pgn_timing(&dataset, "new").unwrap().is_some());
+        assert_eq!(store.snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn manual_import_preserves_precise_timing_and_rejects_identity_conflicts() {
+        use super::super::operation_probe::{record_row_writes, row_write_counts};
+
+        let dir = tempfile::tempdir().unwrap();
+        let dataset: DatasetId = "manual".into();
+        let mut store = SqliteStore::create(
+            dir.path().join("manual.sqlite"),
+            dataset.clone(),
+            tempo_chess::demo_catalog(),
+            tempo_learning::DailyLearning::default().settings(),
+        )
+        .unwrap();
+        let receipt = |id| GameReceipt {
+            id,
+            fingerprint: "fingerprint",
+            report: "report",
+        };
+        let exact = comparison("game", Some(150)).game;
+        store
+            .apply_manual_games(&dataset, &[exact], receipt("exact"))
+            .unwrap();
+        record_row_writes(&store.connection, &["games", "game_receipts"]);
+        let result = store
+            .apply_manual_games(
+                &dataset,
+                &[comparison("game", None).game],
+                receipt("less-precise"),
+            )
+            .unwrap();
+        assert_eq!(result.counts.duplicates, 1);
+        assert_eq!(
+            store.pgn_timing(&dataset, "game").unwrap().unwrap().end_ms,
+            Some(150)
+        );
+        assert_eq!(
+            row_write_counts(&store.connection),
+            BTreeMap::from([("game_receipts".into(), 1)])
+        );
+
+        assert!(matches!(
+            store.apply_manual_games(
+                &dataset,
+                &[
+                    comparison("new", None).game,
+                    comparison("game", Some(180)).game
+                ],
+                receipt("conflicting"),
+            ),
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(store.pgn_timing(&dataset, "new").unwrap().is_none());
+        assert_eq!(
+            store.pgn_timing(&dataset, "game").unwrap().unwrap().end_ms,
+            Some(150)
+        );
+        assert!(
+            store
+                .game_receipt(&dataset, "conflicting", "fingerprint")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            row_write_counts(&store.connection),
+            BTreeMap::from([("game_receipts".into(), 1)])
+        );
     }
 
     #[test]

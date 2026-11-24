@@ -3,8 +3,8 @@
 use crate::store_error::{conflict, invalid};
 use crate::transaction::{initial_snapshot, stage_commit};
 use crate::{
-    Commit, DatasetIdentity, ContentReceipt, ContentSource, ContentState, Receipt, ReceiptResult,
-    RepertoireDocument, RepertoireReset, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
+    Commit, ContentReceipt, ContentSource, ContentState, DatasetIdentity, Receipt, ReceiptResult,
+    PriorRepertoireReset, RepertoireDocument, Snapshot, Store, StoreError, StoredAttempt, StudyScope,
     StudyState, Write,
 };
 use rusqlite::{
@@ -15,6 +15,7 @@ use tempo_chess::{Catalog, ContentItem, LeadInEvidence};
 use tempo_learning::{LearningState, SchedulerSettings};
 use tempo_types::{AttemptId, ContentVersion, DatasetId, Grade, Revision, StudyDay, TargetId};
 
+mod authored_source_pairings;
 mod game_choices;
 mod game_evidence;
 mod game_model;
@@ -32,10 +33,13 @@ mod save_snapshot;
 mod saved_reviews;
 mod study_plan;
 pub use study_plan::{
-    PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult, StudyDayAuthority,
-    StudyPlanCapture, StudyPlanInputFacts, StudyPlanTargetFacts, StudyProfilePlanEffect,
-    StudyProjectionBasis,
+    ActiveStudyWork, PLAN_ENTRY_CHUNK, PlanPublishResult, PlanReclaimResult, PlanStageResult,
+    PreparedStudyCandidate, PreparedStudyIssue, PreparedStudyNext,
+    ResumeSkippedOutcome, StudyDayAuthority, StudyPlanCapture, StudyPlanInputFacts,
+    StudyPlanTargetFacts, StudyProfileFacts,
+    StudyProfilePlanEffect, StudyProjectionBasis, StudyThemeSelection,
 };
+pub use study_plan::{PublishStudySummary, StudyFamilySummary, StudySummary, StudySummaryRead};
 mod study_content;
 mod tactic_policy;
 mod tactical_analysis;
@@ -49,7 +53,7 @@ pub use game_choices::ChoiceMigrationReport;
 
 mod coverage;
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 28;
 const STUDY_PLAN_SCHEMA: &str = include_str!("sqlite_store/study_plan.sql");
 const REPERTOIRE_PARTITION_SCHEMA: &str = include_str!("sqlite_store/repertoire_partition.sql");
 const REPERTOIRE_PARTITION_LEGACY: &str =
@@ -62,6 +66,8 @@ const REPERTOIRE_RUNS_SCHEMA: &str = include_str!("sqlite_store/repertoire_runs.
 const TACTICAL_IDENTITY_SCHEMA: &str = include_str!("sqlite_store/tactical_identity.sql");
 const TACTICAL_REPORT_GENERATION_SCHEMA: &str =
     include_str!("sqlite_store/tactical_report_generation.sql");
+const RETIRE_TACTICAL_REPORT_GENERATION: &str =
+    include_str!("sqlite_store/retire_tactical_report_generation.sql");
 const REPERTOIRE_SUSPENSIONS_SCHEMA: &str = include_str!("sqlite_store/repertoire_suspensions.sql");
 const SAVED_REVIEWS_SCHEMA: &str = include_str!("sqlite_store/saved_reviews.sql");
 const TACTICAL_ANALYSIS_SCHEMA: &str = include_str!("sqlite_store/tactical_analysis.sql");
@@ -151,6 +157,9 @@ impl SqliteStore {
             .execute_batch(REPERTOIRE_DOCUMENT_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(authored_source_pairings::SCHEMA)
+            .map_err(database_error)?;
+        transaction
             .execute_batch(GAME_EVIDENCE_SCHEMA)
             .map_err(database_error)?;
         transaction
@@ -187,6 +196,9 @@ impl SqliteStore {
             .execute_batch(TACTICAL_REPORT_GENERATION_SCHEMA)
             .map_err(database_error)?;
         transaction
+            .execute_batch(RETIRE_TACTICAL_REPORT_GENERATION)
+            .map_err(database_error)?;
+        transaction
             .execute_batch(COVERAGE_SCHEMA)
             .map_err(database_error)?;
         transaction
@@ -208,6 +220,7 @@ impl SqliteStore {
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         save_snapshot(&transaction, None, &initial)?;
+        transaction.execute_batch(study_plan::SUMMARY_SCHEMA).map_err(database_error)?;
         study_plan::initialize(&transaction)?;
         study_plan::initialize_authority(&transaction)?;
         transaction
@@ -524,6 +537,20 @@ impl SqliteStore {
                 tx.pragma_update(None, "user_version", 25)
                     .map_err(database_error)?;
             }
+            if schema_version(&tx)? == 25 {
+                tx.execute_batch(RETIRE_TACTICAL_REPORT_GENERATION)
+                    .map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 26)
+                    .map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 26 {
+                authored_source_pairings::migrate(&tx)?;
+                tx.pragma_update(None, "user_version", 27).map_err(database_error)?;
+            }
+            if schema_version(&tx)? == 27 {
+                tx.execute_batch(study_plan::SUMMARY_SCHEMA).map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 28).map_err(database_error)?;
+            }
             crate::diagnostics::timed("sqlite.commit", || tx.commit()).map_err(database_error)?;
         }
         let version = schema_version(&connection)?;
@@ -789,24 +816,13 @@ impl Store for SqliteStore {
     ) -> Result<crate::TacticalObservationPage, StoreError> {
         tactical_analysis::observations(&self.connection, dataset, detector, version, before, limit)
     }
-    fn reset_repertoire(
-        &mut self,
+    fn accepted_repertoire_reset(
+        &self,
         dataset: &DatasetId,
         repertoire: &str,
         command_id: &str,
-        at_ms: u64,
-        fresh: &LearningState,
-    ) -> Result<RepertoireReset, StoreError> {
-        let _diagnostic =
-            crate::diagnostics::Operation::new("sqlite.sqlite_store.reset_repertoire");
-        repertoire_resets::apply(
-            &mut self.connection,
-            dataset,
-            repertoire,
-            command_id,
-            at_ms,
-            fresh,
-        )
+    ) -> Result<PriorRepertoireReset, StoreError> {
+        repertoire_resets::accepted(&self.connection, dataset, repertoire, command_id)
     }
 
     fn repertoire_reset_at(
@@ -841,6 +857,15 @@ impl Store for SqliteStore {
                 |row| row.get(0),
             )
             .map_err(database_error)
+    }
+
+    fn apply_manual_games(
+        &mut self,
+        dataset: &DatasetId,
+        games: &[crate::GameRecord],
+        receipt: crate::GameReceipt<'_>,
+    ) -> Result<crate::AcceptedGames, StoreError> {
+        self.save_manual_games(dataset, games, receipt)
     }
 
     fn commit_games(
@@ -1267,32 +1292,6 @@ impl Store for SqliteStore {
         game_model::status(&self.connection, dataset).map(Some)
     }
 
-    fn model_bootstrap_repertoires(&self, dataset: &DatasetId) -> Result<Vec<String>, StoreError> {
-        let _diagnostic =
-            crate::diagnostics::Operation::new("sqlite.sqlite_store.model_bootstrap_repertoires");
-        game_model::bootstrap_repertoires(&self.connection, dataset)
-    }
-
-    fn finish_model_bootstrap(
-        &mut self,
-        dataset: &DatasetId,
-        content_revision: Revision,
-        repertoire: &str,
-        source_id: &str,
-        stamp: Option<&crate::ModelInputStamp>,
-    ) -> Result<(), StoreError> {
-        let _diagnostic =
-            crate::diagnostics::Operation::new("sqlite.sqlite_store.finish_model_bootstrap");
-        game_model::finish_bootstrap(
-            &mut self.connection,
-            dataset,
-            content_revision,
-            repertoire,
-            source_id,
-            stamp,
-        )
-    }
-
     fn game_library(
         &self,
         dataset: &DatasetId,
@@ -1499,32 +1498,35 @@ impl Store for SqliteStore {
         ContentState::from_study(state, basis)
     }
 
+    fn local_profile(&self) -> Result<Option<String>, StoreError> {
+        SqliteStore::local_profile(self)
+    }
+
+    fn update_study_profile_for_plan(
+        &mut self,
+        dataset: &DatasetId,
+        expected: &str,
+        replacement: &str,
+        effect: StudyProfilePlanEffect,
+    ) -> Result<(), StoreError> {
+        SqliteStore::update_study_profile_for_plan(self, dataset, expected, replacement, effect)
+    }
+
     fn commit_study(
         &mut self,
         commit: Commit,
         scope: StudyScope<'_>,
     ) -> Result<Revision, StoreError> {
-        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_study");
-        if commit
-            .writes
-            .iter()
-            .any(|write| matches!(write, Write::Catalog(_) | Write::Restore { .. }))
-        {
-            return Err(invalid("content writes require a content transaction"));
-        }
-        let transaction = crate::diagnostics::timed("sqlite.begin", || {
-            self.connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-        })
-        .map_err(database_error)?;
-        let state = load_study::load_study(&transaction, scope)?;
-        let previous = load_study::staging_image(state);
-        let next = stage_commit(&previous, commit)?;
-        save_snapshot(&transaction, Some(&previous), &next)?;
-        study_plan::record_accepted_first_teach(&transaction, &previous, &next, scope.submission)?;
-        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
-            .map_err(database_error)?;
-        Ok(next.revision)
+        self.commit_study_transaction(commit, scope, None)
+    }
+
+    fn commit_issued_skip(
+        &mut self,
+        commit: Commit,
+        scope: StudyScope<'_>,
+        day: StudyDay,
+    ) -> Result<Revision, StoreError> {
+        self.commit_study_transaction(commit, scope, Some(day))
     }
 
     fn commit(&mut self, commit: Commit) -> Result<Revision, StoreError> {
@@ -1535,26 +1537,26 @@ impl Store for SqliteStore {
     fn repertoire_document(&self, id: &str) -> Result<RepertoireDocument, StoreError> {
         let _diagnostic =
             crate::diagnostics::Operation::new("sqlite.sqlite_store.repertoire_document");
-        let (dataset, revision, item, pgn, source_id, authority, suspended):
-            (_, u64, Option<String>, Option<String>, _, Option<String>, bool) = self.connection
+        let (dataset, revision, item, pgn, source_id, suspended):
+            (_, u64, Option<String>, Option<String>, _, bool) = self.connection
             .query_row(
                 "SELECT state.dataset_id, state.content_revision,
                         (SELECT item FROM current_content
                          WHERE dataset_id=state.dataset_id AND repertoire=?1 ORDER BY target_id LIMIT 1),
-                        CASE WHEN input.state='unavailable' THEN NULL ELSE source.pgn END,
-                        document.source_id,input.state,
+                        CASE WHEN pairing.source_id=document.source_id THEN source.pgn END,
+                        document.source_id,
                         EXISTS(SELECT 1 FROM repertoire_suspensions
                             WHERE dataset_id=state.dataset_id AND repertoire_id=?1)
                  FROM store_state AS state
                  LEFT JOIN repertoire_documents AS document
                     ON document.dataset_id=state.dataset_id AND document.repertoire_id=?1
                  LEFT JOIN content_sources AS source ON source.id=document.source_id
-                 LEFT JOIN game_model_inputs AS input
-                    ON (input.dataset_id,input.repertoire_id)=(document.dataset_id,document.repertoire_id)
+                 LEFT JOIN authored_source_pairings AS pairing
+                    ON (pairing.dataset_id,pairing.repertoire_id)=(document.dataset_id,document.repertoire_id)
                  WHERE state.singleton=1",
                 [id],
                 |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?)),
+                    row.get(4)?, row.get(5)?)),
             )
             .map_err(database_error)?;
         Ok(RepertoireDocument {
@@ -1564,11 +1566,6 @@ impl Store for SqliteStore {
             item: item.as_deref().map(row_values::decode).transpose()?,
             pgn,
             source_id,
-            model_authority: match authority.as_deref() {
-                Some("needs_bootstrap") => crate::ModelAuthority::NeedsBootstrap,
-                Some("verified") => crate::ModelAuthority::Verified,
-                _ => crate::ModelAuthority::Unavailable,
-            },
         })
     }
 
@@ -1697,7 +1694,14 @@ impl SqliteStore {
         } else {
             let previous = load_snapshot(&transaction)?;
             let next = stage_commit(&previous, commit)?;
-            save_snapshot(&transaction, Some(&previous), &next)?;
+            let gate_released = save_snapshot::save_snapshot_with_admission_effect(
+                &transaction, Some(&previous), &next,
+            )?;
+            if previous.dataset == next.dataset
+                && (gate_released || prepared_content_changed(&transaction, &previous, &next)?)
+            {
+                study_plan::mark_content_projections_dirty(&transaction, &dataset)?;
+            }
             (
                 next.revision,
                 previous.dataset != next.dataset || previous.catalog != next.catalog,
@@ -1756,7 +1760,10 @@ impl SqliteStore {
                 ).map_err(database_error)? != 0;
                 let verified =
                     game_model::set_verified(&transaction, &dataset, repertoire, model_input)?;
-                if (changed || verified) && !catalog_changed {
+                let paired = authored_source_pairings::record(
+                    &transaction, &dataset, repertoire, id,
+                )?;
+                if (changed || verified || paired) && !catalog_changed {
                     if no_writes_with_receipt {
                         revision = Revision(
                             revision
@@ -1786,6 +1793,106 @@ impl SqliteStore {
         crate::diagnostics::timed("sqlite.commit", || transaction.commit())
             .map_err(database_error)?;
         Ok(revision)
+    }
+}
+
+fn prepared_content_changed(
+    tx: &Transaction<'_>,
+    previous: &Snapshot,
+    next: &Snapshot,
+) -> Result<bool, StoreError> {
+    use std::collections::BTreeSet;
+
+    // Route identity and presentation may change without moving an occurrence.
+    // Prerequisites depend on the ordered target sequence within each route.
+    let routes = |catalog: &Catalog| {
+        catalog.lines.iter().map(|line| (line.repertoire.clone(), line.targets.clone()))
+            .collect::<BTreeSet<_>>()
+    };
+    if previous.catalog.items.len() != next.catalog.items.len()
+        || (previous.catalog.lines != next.catalog.lines
+            && routes(&previous.catalog) != routes(&next.catalog))
+    {
+        return Ok(true);
+    }
+
+    let day = if previous.learning != next.learning {
+        tx.query_row(
+            "SELECT study_day FROM study_projection_state WHERE dataset_id=?1",
+            [&next.dataset.0],
+            |row| row.get::<_, Option<i32>>(0),
+        ).optional().map_err(database_error)?.flatten().map(StudyDay)
+    } else {
+        None
+    };
+    for (target, before) in &previous.catalog.items {
+        let Some(after) = next.catalog.items.get(target) else {
+            return Ok(true);
+        };
+        if before.version != after.version
+            || before.active() != after.active()
+            || before.definition.kind != after.definition.kind
+        {
+            return Ok(true);
+        }
+        let (old, new) = (&previous.learning[target], &next.learning[target]);
+        if before.active() && !before.definition.is_repertoire() && !new.introduced {
+            let before_themes = before.tactic_policy_facts.as_ref()
+                .map(|facts| facts.theme_ids()).filter(|themes| !themes.is_empty());
+            let after_themes = after.tactic_policy_facts.as_ref()
+                .map(|facts| facts.theme_ids()).filter(|themes| !themes.is_empty());
+            if before_themes != after_themes {
+                return Ok(true);
+            }
+        }
+        if before.active() && old != new
+            && day.is_some_and(|day| {
+                old.miss_revision != new.miss_revision
+                    || old.prepared_availability(before.version, day) != new.prepared_availability(after.version, day)
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+impl SqliteStore {
+    fn commit_study_transaction(
+        &mut self,
+        commit: Commit,
+        scope: StudyScope<'_>,
+        skip_day: Option<StudyDay>,
+    ) -> Result<Revision, StoreError> {
+        let _diagnostic = crate::diagnostics::Operation::new("sqlite.sqlite_store.commit_study");
+        if commit
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Catalog(_) | Write::Restore { .. }))
+        {
+            return Err(invalid("content writes require a content transaction"));
+        }
+        let transaction = crate::diagnostics::timed("sqlite.begin", || {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+        })
+        .map_err(database_error)?;
+        let state = load_study::load_study(&transaction, scope)?;
+        let previous = load_study::staging_image(state);
+        let next = stage_commit(&previous, commit)?;
+        save_snapshot(&transaction, Some(&previous), &next)?;
+        let spent = study_plan::record_accepted_first_teach(
+            &transaction, &previous, &next, scope.submission,
+        )?;
+        if let Some(day) = skip_day {
+            study_plan::record_issued_skip(&transaction, &previous, &next, scope, day)?;
+        }
+        if spent || study_plan::acceptance_changes_basis(&transaction, &previous, &next, scope)? {
+            study_plan::mark_acceptance_projections_dirty(&transaction, &next.dataset)?;
+        }
+        crate::diagnostics::timed("sqlite.commit", || transaction.commit())
+            .map_err(database_error)?;
+        Ok(next.revision)
     }
 }
 

@@ -38,19 +38,6 @@ pub(super) fn save(
     Ok(())
 }
 
-pub(super) fn clear_repertoire(
-    tx: &Transaction<'_>,
-    dataset: &DatasetId,
-    repertoire: &str,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "DELETE FROM repertoire_run_steps WHERE dataset_id=?1 AND repertoire_id=?2",
-        params![dataset.0, repertoire],
-    )
-    .map_err(database_error)?;
-    Ok(())
-}
-
 pub(super) fn latest_test(
     db: &Connection,
     dataset: &DatasetId,

@@ -29,13 +29,15 @@ pub(super) fn validate_new_outcomes(
             let prior = &previous.learning[&attempt.attempt.target];
             let current = &staged.learning[&attempt.attempt.target];
             if attempt.mode == crate::ActivityMode::Repair {
-                let expected = tempo_learning::DailyLearning::repair(
-                    prior,
-                    attempt.attempt.content_version,
-                    attempt.issued_miss_revision,
-                    acceptance.at,
-                )
-                .map_err(|_| invalid("invalid guided repair"))?;
+                let expected = if let Some(work) = &attempt.issued_work {
+                    tempo_learning::DailyLearning::complete_human_correction(
+                        prior, work.obligation.version, work.obligation.revision,
+                    )
+                } else {
+                    tempo_learning::DailyLearning::repair(
+                        prior, attempt.attempt.content_version, attempt.issued_miss_revision, acceptance.at,
+                    ).map_err(|_| invalid("invalid guided repair"))?
+                };
                 if *current != expected {
                     return Err(invalid(
                         "guided repair must commit with its learning transition",
@@ -134,6 +136,9 @@ pub(super) fn validate_new_outcomes(
                 return Err(invalid(
                     "allowance receipts require a daily allowance transaction",
                 ));
+            }
+            ReceiptResult::ResumeSkipped { .. } => {
+                return Err(invalid("resume receipts require a day deferral transaction"));
             }
             ReceiptResult::External { target, transition } => {
                 if !assessments.iter().any(|record| {
